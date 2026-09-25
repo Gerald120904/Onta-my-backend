@@ -1,0 +1,12 @@
+name: donde_se_fue_mi_plata_api
+description: API REST para Donde se fue mi plata
+version: 1.0.0
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+dependencies:
+  shelf: ^1.4.2
+  shelf_router: ^1.1.4
+  shelf_cors_headers: ^0.1.5
+  sqlite3: ^2.7.0
+  crypto: ^3.0.6
+  uuid: ^4.5.1
