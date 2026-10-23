@@ -16,6 +16,16 @@ void main() {
       db.close();
     });
 
+    test('seed() with force: true is still strictly blocked in production environment', () {
+      final db = AppDatabase.inMemory();
+      // Call seed in production mode with force: true
+      db.seed(force: true, environment: 'production');
+      // Check users
+      final rows = db.db.select('SELECT * FROM users WHERE email=?', ['demo@plata.app']);
+      expect(rows, isEmpty, reason: 'Demo user must NOT be seeded in production even with force: true');
+      db.close();
+    });
+
     test('seed() works normally in development/local environment', () {
       final db = AppDatabase.inMemory();
       db.seed(environment: 'development');

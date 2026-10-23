@@ -300,8 +300,8 @@ class AppDatabase {
         Platform.environment['NODE_ENV']?.toLowerCase() ??
         'development';
     final isProduction = env == 'production' || env == 'prod';
-    if (isProduction && !force) {
-      return; // Desactivado completamente en producción
+    if (isProduction) {
+      return; // Desactivado absolutamente en producción (incluso si force: true)
     }
     if (db.select('SELECT id FROM users WHERE email=?', ['demo@plata.app']).isNotEmpty) return;
     final userId = uuid.v4();
