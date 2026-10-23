@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:bcrypt/bcrypt.dart';
 import 'package:crypto/crypto.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
@@ -9,52 +10,192 @@ class AppDatabase {
   static const uuid = Uuid();
   AppDatabase._(this.db);
 
-  factory AppDatabase.open() {
-    final dir = Directory('data');
+  factory AppDatabase.open({String? customPath}) {
+    final dbPath = customPath ?? Platform.environment['DATABASE_PATH'] ?? 'data/plata.db';
+    final file = File(dbPath);
+    final dir = file.parent;
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    final app = AppDatabase._(sqlite3.open('data/plata.db'));
+    final app = AppDatabase._(sqlite3.open(dbPath));
     app._migrate();
     return app;
   }
 
-  String hash(String value) => sha256.convert(utf8.encode(value)).toString();
+  factory AppDatabase.inMemory() {
+    final app = AppDatabase._(sqlite3.openInMemory());
+    app._migrate();
+    return app;
+  }
+
+  /// Hashes a password using bcrypt with individual salt.
+  String hashPassword(String password) {
+    return BCrypt.hashpw(password, BCrypt.gensalt(logRounds: 10));
+  }
+
+  /// Legacy sha256 fallback hash.
+  String legacySha256(String value) => sha256.convert(utf8.encode(value)).toString();
+
+  /// Verifies password against stored hash. Supports both BCrypt and legacy SHA-256.
+  bool verifyPassword(String password, String storedHash) {
+    if (storedHash.startsWith(r'$2a$') || storedHash.startsWith(r'$2b$')) {
+      try {
+        return BCrypt.checkpw(password, storedHash);
+      } catch (_) {
+        return false;
+      }
+    }
+    // Fallback for legacy sha256
+    return legacySha256(password) == storedHash;
+  }
+
+  /// Checks if stored hash is legacy SHA-256.
+  bool isLegacyHash(String storedHash) {
+    return !storedHash.startsWith(r'$2a$') && !storedHash.startsWith(r'$2b$');
+  }
+
+  /// Upgrades user's password to BCrypt hash transparently.
+  void upgradePasswordHash(String userId, String plainPassword) {
+    final newHash = hashPassword(plainPassword);
+    db.execute('UPDATE users SET password_hash=? WHERE id=?', [newHash, userId]);
+  }
+
+  void _addColumnIfNotExists(String table, String column, String typeWithDefault) {
+    final info = db.select('PRAGMA table_info($table)');
+    final exists = info.any((row) => (row['name'] as String).toLowerCase() == column.toLowerCase());
+    if (!exists) {
+      db.execute('ALTER TABLE $table ADD COLUMN $column $typeWithDefault');
+    }
+  }
 
   void _migrate() {
+    // 1. Initial base tables
     db.execute('''
       CREATE TABLE IF NOT EXISTS users(
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL, opening_balance REAL NOT NULL DEFAULT 0,
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        opening_balance REAL NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS sessions(
-        token TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL
+        token TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'
       );
       CREATE TABLE IF NOT EXISTS transactions(
-        id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type TEXT NOT NULL,
-        category TEXT NOT NULL, amount REAL NOT NULL, description TEXT NOT NULL,
-        date TEXT NOT NULL, recognized INTEGER NOT NULL DEFAULT 1
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        amount REAL NOT NULL,
+        description TEXT NOT NULL,
+        date TEXT NOT NULL,
+        recognized INTEGER NOT NULL DEFAULT 1
       );
       CREATE TABLE IF NOT EXISTS commitments(
-        id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL,
-        amount REAL NOT NULL, due_date TEXT NOT NULL, status TEXT NOT NULL
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        amount REAL NOT NULL,
+        due_date TEXT NOT NULL,
+        status TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS goals(
-        id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL,
-        target_amount REAL NOT NULL, saved_amount REAL NOT NULL
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        target_amount REAL NOT NULL,
+        saved_amount REAL NOT NULL
       );
       CREATE TABLE IF NOT EXISTS decisions(
-        id TEXT PRIMARY KEY, user_id TEXT NOT NULL, action TEXT NOT NULL,
-        note TEXT NOT NULL, created_at TEXT NOT NULL
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        note TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS reviews(
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        period_title TEXT NOT NULL,
+        period_subtitle TEXT NOT NULL,
+        transaction_ids TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        decision_details TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS sync_log(
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_log_user_seq ON sync_log(user_id, sequence);
+      CREATE TABLE IF NOT EXISTS idempotency_keys(
+        operation_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        response_code INTEGER NOT NULL,
+        response_body TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sync_conflicts(
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        client_version INTEGER NOT NULL,
+        server_version INTEGER NOT NULL,
+        client_payload TEXT NOT NULL,
+        server_payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unresolved',
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS audit_log(
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        previous_values TEXT,
+        new_values TEXT,
+        device_id TEXT,
+        client_timestamp TEXT,
+        server_timestamp TEXT NOT NULL
       );
     ''');
+
+    // Safe, non-destructive column additions for existing installations
+    _addColumnIfNotExists('sessions', 'expires_at', "TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
+
+    for (final table in ['transactions', 'commitments', 'goals', 'decisions']) {
+      _addColumnIfNotExists(table, 'version', 'INTEGER NOT NULL DEFAULT 1');
+      _addColumnIfNotExists(table, 'updated_at', 'TEXT');
+      _addColumnIfNotExists(table, 'deleted_at', 'TEXT');
+    }
+    _addColumnIfNotExists('users', 'updated_at', 'TEXT');
   }
 
   void seed() {
     if (db.select('SELECT id FROM users WHERE email=?', ['demo@plata.app']).isNotEmpty) return;
     final userId = uuid.v4();
+    final now = DateTime.now().toIso8601String();
     db.execute(
-      'INSERT INTO users(id,name,email,password_hash,opening_balance,created_at) VALUES(?,?,?,?,?,?)',
-      [userId, 'Sofía', 'demo@plata.app', hash('123456'), 143300.0, DateTime.now().toIso8601String()],
+      'INSERT INTO users(id,name,email,password_hash,opening_balance,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+      [userId, 'Sofía', 'demo@plata.app', hashPassword('123456'), 143300.0, now, now],
     );
     final txs = <List<dynamic>>[
       ['Comida', 4500.0, 'Alimentación', 1],
@@ -64,24 +205,40 @@ class AppDatabase {
       ['Otros', 3200.0, 'Movimiento sin identificar', 0],
     ];
     for (final t in txs) {
+      final txId = uuid.v4();
       db.execute(
-        'INSERT INTO transactions(id,user_id,type,category,amount,description,date,recognized) VALUES(?,?,?,?,?,?,?,?)',
-        [uuid.v4(), userId, 'expense', t[0], t[1], t[2], DateTime.now().toIso8601String(), t[3]],
+        'INSERT INTO transactions(id,user_id,type,category,amount,description,date,recognized,version,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        [txId, userId, 'expense', t[0], t[1], t[2], now, t[3], 1, now],
       );
     }
     db.execute(
-      'INSERT INTO commitments(id,user_id,title,amount,due_date,status) VALUES(?,?,?,?,?,?)',
-      [uuid.v4(), userId, 'Pago pendiente', 35000.0, DateTime.now().add(const Duration(days: 5)).toIso8601String(), 'pending'],
+      'INSERT INTO commitments(id,user_id,title,amount,due_date,status,version,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+      [uuid.v4(), userId, 'Pago pendiente', 35000.0, DateTime.now().add(const Duration(days: 5)).toIso8601String(), 'pending', 1, now],
     );
     db.execute(
-      'INSERT INTO goals(id,user_id,title,target_amount,saved_amount) VALUES(?,?,?,?,?)',
-      [uuid.v4(), userId, 'Ahorro reservado', 100000.0, 20000.0],
+      'INSERT INTO goals(id,user_id,title,target_amount,saved_amount,version,updated_at) VALUES(?,?,?,?,?,?,?)',
+      [uuid.v4(), userId, 'Ahorro reservado', 100000.0, 20000.0, 1, now],
     );
   }
 
   String? userIdFromToken(String? token) {
     if (token == null || token.isEmpty) return null;
-    final r = db.select('SELECT user_id FROM sessions WHERE token=?', [token]);
-    return r.isEmpty ? null : r.first['user_id'] as String;
+    final r = db.select('SELECT user_id, expires_at FROM sessions WHERE token=?', [token]);
+    if (r.isEmpty) return null;
+
+    final expiresAtStr = r.first['expires_at'] as String?;
+    if (expiresAtStr != null) {
+      final expiresAt = DateTime.tryParse(expiresAtStr);
+      if (expiresAt != null && DateTime.now().isAfter(expiresAt)) {
+        // Expired session: revoke immediately
+        db.execute('DELETE FROM sessions WHERE token=?', [token]);
+        return null;
+      }
+    }
+    return r.first['user_id'] as String;
+  }
+
+  void close() {
+    db.dispose();
   }
 }

@@ -1,0 +1,7 @@
+.dart_tool
+.git
+.gitignore
+data/
+*.db
+*.log
+build/
