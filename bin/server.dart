@@ -73,12 +73,42 @@ Future<void> main() async {
   final dbPath = Platform.environment['DATABASE_PATH'];
 
   final AppDatabase db;
-  if (databaseUrl != null && databaseUrl.trim().isNotEmpty) {
-    print('Conectando a base de datos PostgreSQL en la nube...');
-    db = await AppDatabase.openAsync(databaseUrl: databaseUrl);
+  if (isProduction) {
+    // 2. Cuando ENVIRONMENT=production, exige una DATABASE_URL PostgreSQL válida.
+    // Si falta o es incorrecta, detén el arranque; nunca uses SQLite como alternativa en producción.
+    if (!AppDatabase.isValidPostgresUrl(databaseUrl)) {
+      stderr.writeln(
+        'ERROR CRÍTICO: En entorno de producción (ENVIRONMENT=production), se exige una DATABASE_URL PostgreSQL válida.\n'
+        'El arranque ha sido detenido porque falta o es incorrecta la URL.\n'
+        'NUNCA se debe usar SQLite como alternativa en producción.\n'
+        'DATABASE_URL configurada: ${databaseUrl == null ? "(no definida)" : "(formato no válido)"}',
+      );
+      exit(1);
+    }
+
+    try {
+      print('Conectando a base de datos PostgreSQL en la nube (Producción con TLS obligatorio)...');
+      db = await AppDatabase.openAsync(
+        databaseUrl: databaseUrl,
+        isProduction: true,
+        environment: env,
+      );
+    } catch (e) {
+      stderr.writeln('ERROR CRÍTICO: No se pudo conectar a PostgreSQL en producción: $e');
+      exit(1);
+    }
   } else {
-    print('Iniciando base de datos SQLite local...');
-    db = AppDatabase.open(customPath: dbPath);
+    if (AppDatabase.isValidPostgresUrl(databaseUrl)) {
+      print('Conectando a base de datos PostgreSQL...');
+      db = await AppDatabase.openAsync(
+        databaseUrl: databaseUrl,
+        isProduction: false,
+        environment: env,
+      );
+    } else {
+      print('Iniciando base de datos SQLite local...');
+      db = AppDatabase.open(customPath: dbPath);
+    }
   }
 
   if (allowSeed) {

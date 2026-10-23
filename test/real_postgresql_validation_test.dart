@@ -5,14 +5,12 @@ import 'package:test/test.dart';
 import '../lib/src/api.dart';
 import '../lib/src/database.dart';
 import '../lib/src/migrations/migration_runner.dart';
-import '../lib/src/sync_service.dart';
 
 void main() {
   const pgUrl = 'postgresql://postgres@127.0.0.1:5433/onta_test?sslmode=disable';
 
   group('ONTA MY MONEY — VALIDACIÓN REAL DE POSTGRESQL', () {
     late PostgresAppDatabase pgDb;
-    late SyncService syncService;
     late Api api;
 
     Future<Response> send(
@@ -38,7 +36,6 @@ void main() {
     setUpAll(() async {
       // 1. Conectar directamente a la base de datos PostgreSQL real usando el driver postgres
       pgDb = await PostgresAppDatabase.connect(pgUrl);
-      syncService = SyncService(pgDb);
       api = Api(pgDb);
     });
 
@@ -470,7 +467,6 @@ void main() {
     // =========================================================================
     group('5. Sincronización Push / Pull y Conflictos en PostgreSQL', () {
       late String syncToken;
-      late String syncUserId;
 
       setUpAll(() async {
         final email = 'sync_user_${DateTime.now().millisecondsSinceEpoch}@plata.app';
@@ -484,7 +480,8 @@ void main() {
             'opening_balance': 30000.0,
           },
         );
-        syncUserId = (jsonDecode(await reg.readAsString()) as Map)['id'] as String;
+        final registeredUserId = (jsonDecode(await reg.readAsString()) as Map)['id'] as String;
+        expect(registeredUserId, isNotEmpty);
 
         final login = await send(
           'POST',

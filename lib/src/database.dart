@@ -96,11 +96,63 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
     return SqliteAppDatabase.inMemory();
   }
 
+  /// Valida si una URL corresponde a una conexión PostgreSQL sintácticamente válida.
+  static bool isValidPostgresUrl(String? url) {
+    if (url == null || url.trim().isEmpty) return false;
+    final trimmed = url.trim();
+    if (!trimmed.startsWith('postgres://') && !trimmed.startsWith('postgresql://')) {
+      return false;
+    }
+    try {
+      final uri = Uri.parse(trimmed);
+      return uri.host.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Asynchronous factory supporting both PostgreSQL (Neon) and SQLite.
-  static Future<AppDatabase> openAsync({String? customPath, String? databaseUrl}) async {
+  /// En producción (ENVIRONMENT=production), exige una DATABASE_URL válida y nunca recurre a SQLite.
+  static Future<AppDatabase> openAsync({
+    String? customPath,
+    String? databaseUrl,
+    bool? isProduction,
+    String? environment,
+  }) async {
+    final env = environment?.toLowerCase() ??
+        Platform.environment['ENVIRONMENT']?.toLowerCase() ??
+        Platform.environment['APP_ENV']?.toLowerCase() ??
+        Platform.environment['NODE_ENV']?.toLowerCase() ??
+        'development';
+    final prod = isProduction ?? (env == 'production' || env == 'prod');
     final url = databaseUrl ?? Platform.environment['DATABASE_URL'];
-    if (url != null && url.trim().isNotEmpty && (url.startsWith('postgres://') || url.startsWith('postgresql://'))) {
-      return await PostgresAppDatabase.connect(url);
+
+    if (prod) {
+      if (url == null || url.trim().isEmpty) {
+        throw StateError(
+          'En entorno de producción (ENVIRONMENT=production), se exige una DATABASE_URL PostgreSQL válida. '
+          'No se permite SQLite como alternativa en producción.',
+        );
+      }
+      if (!isValidPostgresUrl(url)) {
+        throw ArgumentError(
+          'DATABASE_URL no es una URL de PostgreSQL válida en producción: "$url". '
+          'Se detiene el arranque; nunca se debe usar SQLite en producción.',
+        );
+      }
+      return await PostgresAppDatabase.connect(
+        url,
+        isProduction: true,
+        environment: env,
+      );
+    }
+
+    if (isValidPostgresUrl(url)) {
+      return await PostgresAppDatabase.connect(
+        url!,
+        isProduction: false,
+        environment: env,
+      );
     }
     return SqliteAppDatabase.open(customPath: customPath);
   }
@@ -510,8 +562,35 @@ class PostgresAppDatabase extends AppDatabase {
 
   PostgresAppDatabase._(this._pool) : super.base();
 
-  static Future<PostgresAppDatabase> connect(String databaseUrl) async {
+  static Future<PostgresAppDatabase> connect(
+    String databaseUrl, {
+    bool? isProduction,
+    String? environment,
+  }) async {
+    final env = environment?.toLowerCase() ??
+        Platform.environment['ENVIRONMENT']?.toLowerCase() ??
+        Platform.environment['APP_ENV']?.toLowerCase() ??
+        Platform.environment['NODE_ENV']?.toLowerCase() ??
+        'development';
+    final prod = isProduction ?? (env == 'production' || env == 'prod');
+
     final uri = Uri.parse(databaseUrl);
+    final sslModeParam = uri.queryParameters['sslmode']?.toLowerCase();
+
+    // Condición 1: Cuando ENVIRONMENT=production, rechaza cualquier conexión PostgreSQL con TLS desactivado.
+    // No permitir sslmode=disable aunque aparezca en DATABASE_URL.
+    if (prod && sslModeParam == 'disable') {
+      throw StateError(
+        'Conexión PostgreSQL con TLS desactivado (sslmode=disable) rechazada en entorno de producción. '
+        'TLS es obligatorio en producción.',
+      );
+    }
+
+    // En producción se exige TLS estrictamente. En desarrollo se permite sslmode=disable para pruebas locales aisladas.
+    final SslMode sslMode = prod
+        ? SslMode.require
+        : ((sslModeParam == 'disable') ? SslMode.disable : SslMode.require);
+
     final userInfoParts = uri.userInfo.split(':');
     final username = userInfoParts.isNotEmpty ? Uri.decodeComponent(userInfoParts[0]) : '';
     final password = userInfoParts.length > 1 ? Uri.decodeComponent(userInfoParts[1]) : '';
@@ -526,9 +605,6 @@ class PostgresAppDatabase extends AppDatabase {
       username: username,
       password: password,
     );
-
-    final sslModeParam = uri.queryParameters['sslmode']?.toLowerCase();
-    final SslMode sslMode = (sslModeParam == 'disable') ? SslMode.disable : SslMode.require;
 
     // Neon exige conexión cifrada TLS y pool de conexiones apropiado al plan Free
     final pool = Pool.withEndpoints(
