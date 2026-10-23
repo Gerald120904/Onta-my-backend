@@ -187,6 +187,63 @@ class AppDatabase {
       _addColumnIfNotExists(table, 'deleted_at', 'TEXT');
     }
     _addColumnIfNotExists('users', 'updated_at', 'TEXT');
+    _backfillSyncLog();
+  }
+
+  void _backfillSyncLog() {
+    try {
+      final txs = db.select(
+        "SELECT * FROM transactions WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='transaction')",
+      );
+      for (final t in txs) {
+        final now = (t['updated_at'] ?? t['date'] ?? DateTime.now().toIso8601String()).toString();
+        final payload = jsonEncode({
+          'type': t['type'],
+          'category': t['category'],
+          'amount': t['amount'],
+          'description': t['description'],
+          'date': t['date'],
+          'recognized': t['recognized'] == 1,
+        });
+        db.execute(
+          'INSERT INTO sync_log(user_id, entity_type, entity_id, action, version, payload, created_at) VALUES(?,?,?,?,?,?,?)',
+          [t['user_id'], 'transaction', t['id'], 'create', t['version'] ?? 1, payload, now],
+        );
+      }
+
+      final commitments = db.select(
+        "SELECT * FROM commitments WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='commitment')",
+      );
+      for (final c in commitments) {
+        final now = (c['updated_at'] ?? DateTime.now().toIso8601String()).toString();
+        final payload = jsonEncode({
+          'title': c['title'],
+          'amount': c['amount'],
+          'dueDate': c['due_date'],
+          'status': c['status'],
+        });
+        db.execute(
+          'INSERT INTO sync_log(user_id, entity_type, entity_id, action, version, payload, created_at) VALUES(?,?,?,?,?,?,?)',
+          [c['user_id'], 'commitment', c['id'], 'create', c['version'] ?? 1, payload, now],
+        );
+      }
+
+      final goals = db.select(
+        "SELECT * FROM goals WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='goal')",
+      );
+      for (final g in goals) {
+        final now = (g['updated_at'] ?? DateTime.now().toIso8601String()).toString();
+        final payload = jsonEncode({
+          'title': g['title'],
+          'targetAmount': g['target_amount'],
+          'savedAmount': g['saved_amount'],
+        });
+        db.execute(
+          'INSERT INTO sync_log(user_id, entity_type, entity_id, action, version, payload, created_at) VALUES(?,?,?,?,?,?,?)',
+          [g['user_id'], 'goal', g['id'], 'create', g['version'] ?? 1, payload, now],
+        );
+      }
+    } catch (_) {}
   }
 
   void seed() {
