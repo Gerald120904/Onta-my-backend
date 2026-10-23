@@ -293,7 +293,16 @@ class AppDatabase {
     } catch (_) {}
   }
 
-  void seed() {
+  void seed({bool force = false, String? environment}) {
+    final env = environment?.toLowerCase() ??
+        Platform.environment['ENVIRONMENT']?.toLowerCase() ??
+        Platform.environment['APP_ENV']?.toLowerCase() ??
+        Platform.environment['NODE_ENV']?.toLowerCase() ??
+        'development';
+    final isProduction = env == 'production' || env == 'prod';
+    if (isProduction && !force) {
+      return; // Desactivado completamente en producción
+    }
     if (db.select('SELECT id FROM users WHERE email=?', ['demo@plata.app']).isNotEmpty) return;
     final userId = uuid.v4();
     final now = DateTime.now().toIso8601String();

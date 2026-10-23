@@ -5,21 +5,42 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import '../lib/src/api.dart';
 import '../lib/src/database.dart';
 
-Middleware corsMiddleware() {
-  final configuredOrigin = Platform.environment['ALLOWED_ORIGIN'] ?? '*';
+Middleware corsMiddleware({required bool isProduction, String? allowedOriginOverride}) {
+  final rawAllowedOrigin = allowedOriginOverride ?? Platform.environment['ALLOWED_ORIGIN'];
+  final List<String> allowedOrigins = (rawAllowedOrigin != null && rawAllowedOrigin.trim().isNotEmpty)
+      ? rawAllowedOrigin.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList()
+      : <String>[];
 
   return (Handler innerHandler) {
     return (Request request) async {
       final originHeader = request.headers['origin'];
-      final allowOrigin = (configuredOrigin == '*' || originHeader == null)
-          ? configuredOrigin
-          : (configuredOrigin.split(',').map((e) => e.trim()).contains(originHeader) ? originHeader : configuredOrigin);
+      String allowOrigin = '';
+
+      if (isProduction) {
+        // En producción NO se permite comodín '*'
+        // Se valida estrictamente contra la lista blanca configurada en ALLOWED_ORIGIN
+        if (originHeader != null && allowedOrigins.contains(originHeader) && originHeader != '*') {
+          allowOrigin = originHeader;
+        } else {
+          allowOrigin = '';
+        }
+      } else {
+        // En desarrollo / local se permite comodín o el origen entrante
+        if (rawAllowedOrigin == null || rawAllowedOrigin == '*' || allowedOrigins.contains('*')) {
+          allowOrigin = originHeader ?? '*';
+        } else if (originHeader != null && allowedOrigins.contains(originHeader)) {
+          allowOrigin = originHeader;
+        } else {
+          allowOrigin = allowedOrigins.isNotEmpty ? allowedOrigins.first : '*';
+        }
+      }
 
       final corsHeaders = <String, String>{
-        'Access-Control-Allow-Origin': allowOrigin,
+        if (allowOrigin.isNotEmpty) 'Access-Control-Allow-Origin': allowOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Origin, Content-Type, Accept, Authorization, X-Device-Id',
         'Access-Control-Max-Age': '86400',
+        if (isProduction && allowOrigin.isNotEmpty) 'Vary': 'Origin',
       };
 
       if (request.method == 'OPTIONS') {
@@ -39,12 +60,24 @@ Middleware corsMiddleware() {
 }
 
 Future<void> main() async {
+  final env = Platform.environment['ENVIRONMENT']?.toLowerCase() ??
+      Platform.environment['APP_ENV']?.toLowerCase() ??
+      Platform.environment['NODE_ENV']?.toLowerCase() ??
+      'development';
+  final isProduction = env == 'production' || env == 'prod';
+
+  // Desactivación obligatoria de la cuenta de demostración en producción
+  final allowSeed = !isProduction && (Platform.environment['SEED_DEMO_USER']?.toLowerCase() != 'false');
+
   final dbPath = Platform.environment['DATABASE_PATH'];
-  final db = AppDatabase.open(customPath: dbPath)..seed();
+  final db = AppDatabase.open(customPath: dbPath);
+  if (allowSeed) {
+    db.seed();
+  }
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
-      .addMiddleware(corsMiddleware())
+      .addMiddleware(corsMiddleware(isProduction: isProduction))
       .addHandler(Api(db).router.call);
 
   final port = int.tryParse(Platform.environment['PORT'] ?? Platform.environment['API_PORT'] ?? '') ?? 8080;
