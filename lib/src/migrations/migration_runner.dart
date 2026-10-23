@@ -3,6 +3,7 @@ import 'dart:async';
 abstract class MigrationExecutor {
   Future<List<Map<String, dynamic>>> query(String sql, [List<dynamic>? params]);
   Future<void> execute(String sql, [List<dynamic>? params]);
+  Future<T> transaction<T>(Future<T> Function(dynamic tx) action);
   bool get isPostgres;
 }
 
@@ -39,7 +40,7 @@ class MigrationRunner {
           name TEXT NOT NULL,
           email TEXT UNIQUE NOT NULL,
           password_hash TEXT NOT NULL,
-          opening_balance REAL NOT NULL DEFAULT 0,
+          opening_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
           updated_at TEXT,
           version INTEGER NOT NULL DEFAULT 1
@@ -57,7 +58,7 @@ class MigrationRunner {
           user_id TEXT NOT NULL,
           type TEXT NOT NULL,
           category TEXT NOT NULL,
-          amount REAL NOT NULL,
+          amount NUMERIC(18,2) NOT NULL,
           description TEXT NOT NULL,
           date TEXT NOT NULL,
           recognized INTEGER NOT NULL DEFAULT 1,
@@ -70,7 +71,7 @@ class MigrationRunner {
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL,
           title TEXT NOT NULL,
-          amount REAL NOT NULL,
+          amount NUMERIC(18,2) NOT NULL,
           due_date TEXT NOT NULL,
           status TEXT NOT NULL,
           version INTEGER NOT NULL DEFAULT 1,
@@ -82,8 +83,8 @@ class MigrationRunner {
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL,
           title TEXT NOT NULL,
-          target_amount REAL NOT NULL,
-          saved_amount REAL NOT NULL,
+          target_amount NUMERIC(18,2) NOT NULL,
+          saved_amount NUMERIC(18,2) NOT NULL,
           version INTEGER NOT NULL DEFAULT 1,
           updated_at TEXT,
           deleted_at TEXT
@@ -203,26 +204,28 @@ class MigrationRunner {
     final appliedRows = await executor.query('SELECT version FROM schema_migrations ORDER BY version ASC');
     final appliedVersions = appliedRows.map((r) => (r['version'] as num).toInt()).toSet();
 
-    // 3. Apply pending migrations sequentially
+    // 3. Apply pending migrations sequentially within transactions
     for (final m in migrations) {
       if (!appliedVersions.contains(m.version)) {
-        final sql = m.getSql(executor.isPostgres);
-        // Execute statements separated by semicolons
-        final statements = sql
-            .split(';')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty && !s.startsWith('--'))
-            .toList();
+        await executor.transaction((tx) async {
+          final sql = m.getSql(executor.isPostgres);
+          // Execute statements separated by semicolons
+          final statements = sql
+              .split(';')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty && !s.startsWith('--'))
+              .toList();
 
-        for (final stmt in statements) {
-          await executor.execute(stmt);
-        }
+          for (final stmt in statements) {
+            await tx.execute(stmt);
+          }
 
-        final now = DateTime.now().toIso8601String();
-        await executor.execute(
-          'INSERT INTO schema_migrations(version, name, applied_at) VALUES(?, ?, ?)',
-          [m.version, m.name, now],
-        );
+          final now = DateTime.now().toIso8601String();
+          await tx.execute(
+            'INSERT INTO schema_migrations(version, name, applied_at) VALUES(?, ?, ?)',
+            [m.version, m.name, now],
+          );
+        });
       }
     }
   }

@@ -113,6 +113,7 @@ class SyncService {
 
     return {
       'processed': results,
+      'results': results,
       'server_cursor': latestSeq,
       'server_time': DateTime.now().toIso8601String(),
     };
@@ -143,7 +144,7 @@ class SyncService {
         continue;
       }
 
-      // 1. Idempotency check
+      // 1. Idempotency check (preliminary quick check)
       final existingKey = await database.query(
         'SELECT response_code, response_body FROM idempotency_keys WHERE operation_id=? AND user_id=?',
         [opId, userId],
@@ -158,6 +159,21 @@ class SyncService {
       // 2. Process operation within transaction
       try {
         final opResult = await database.transaction((tx) async {
+          // Serialize writes per user in PostgreSQL to guarantee strict monotonic sequence order without gaps
+          if (database.isPostgres) {
+            await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+          }
+
+          // Re-check idempotency inside the lock to safely handle concurrent requests with the same operation_id
+          final existingKeyTx = await tx.query(
+            'SELECT response_code, response_body FROM idempotency_keys WHERE operation_id=? AND user_id=?',
+            [opId, userId],
+          );
+          if (existingKeyTx.isNotEmpty) {
+            final cached = jsonDecode(existingKeyTx.first['response_body'] as String);
+            return Map<String, dynamic>.from(cached as Map);
+          }
+
           final res = await _applyOperationAsync(
             tx: tx,
             userId: userId,
@@ -191,6 +207,18 @@ class SyncService {
 
         results.add(opResult);
       } catch (e) {
+        // En caso de colisión de clave única por solicitudes concurrentes simultáneas
+        final existing = await database.query(
+          'SELECT response_body FROM idempotency_keys WHERE operation_id=?',
+          [opId],
+        );
+        if (existing.isNotEmpty) {
+          try {
+            final cached = jsonDecode(existing.first['response_body'] as String);
+            results.add(Map<String, dynamic>.from(cached as Map));
+            continue;
+          } catch (_) {}
+        }
         results.add({
           'operation_id': opId,
           'status': 'error',
@@ -203,6 +231,7 @@ class SyncService {
 
     return {
       'processed': results,
+      'results': results,
       'server_cursor': latestSeq,
       'server_time': DateTime.now().toIso8601String(),
     };
@@ -916,6 +945,12 @@ class SyncService {
     _recordAuditLogSync(userId, entityType, entityId, action, previousValues, payload, deviceId, now, now);
   }
 
+  static double _asDouble(dynamic v) {
+    if (v == null) return 0.0;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString()) ?? 0.0;
+  }
+
   Future<void> recordChangeAsync({
     required String userId,
     required String entityType,
@@ -925,8 +960,14 @@ class SyncService {
     required Map<String, dynamic> payload,
     String? deviceId,
     Map<String, dynamic>? previousValues,
+    DatabaseExecutor? executor,
   }) async {
     final now = DateTime.now().toIso8601String();
+    if (executor != null) {
+      await _recordSyncLogAsync(executor, userId, entityType, entityId, action, version, payload, now);
+      await _recordAuditLogAsync(executor, userId, entityType, entityId, action, previousValues, payload, deviceId, now, now);
+      return;
+    }
     if (database.isPostgres) {
       await database.transaction((tx) async {
         await _recordSyncLogAsync(tx, userId, entityType, entityId, action, version, payload, now);
@@ -1076,7 +1117,7 @@ class SyncService {
             userId,
             payload['type'] ?? 'expense',
             payload['category'] ?? 'Otros',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['description'] ?? '',
             payload['date'] ?? now,
             (payload['recognized'] ?? true) == true ? 1 : 0,
@@ -1093,7 +1134,7 @@ class SyncService {
             id,
             userId,
             payload['title'] ?? 'Compromiso',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['dueDate'] ?? payload['due_date'] ?? now,
             payload['status'] ?? 'pending',
             version,
@@ -1109,8 +1150,8 @@ class SyncService {
             id,
             userId,
             payload['title'] ?? 'Meta',
-            (payload['targetAmount'] ?? payload['target_amount'] as num?)?.toDouble() ?? 0.0,
-            (payload['savedAmount'] ?? payload['saved_amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
           ],
@@ -1173,7 +1214,7 @@ class SyncService {
             userId,
             payload['type'] ?? 'expense',
             payload['category'] ?? 'Otros',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['description'] ?? '',
             payload['date'] ?? now,
             (payload['recognized'] ?? true) == true ? 1 : 0,
@@ -1190,7 +1231,7 @@ class SyncService {
             id,
             userId,
             payload['title'] ?? 'Compromiso',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['dueDate'] ?? payload['due_date'] ?? now,
             payload['status'] ?? 'pending',
             version,
@@ -1206,8 +1247,8 @@ class SyncService {
             id,
             userId,
             payload['title'] ?? 'Meta',
-            (payload['targetAmount'] ?? payload['target_amount'] as num?)?.toDouble() ?? 0.0,
-            (payload['savedAmount'] ?? payload['saved_amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
           ],
@@ -1267,7 +1308,7 @@ class SyncService {
           [
             payload['type'] ?? 'expense',
             payload['category'] ?? 'Otros',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['description'] ?? '',
             payload['date'] ?? now,
             (payload['recognized'] ?? true) == true ? 1 : 0,
@@ -1284,7 +1325,7 @@ class SyncService {
           'WHERE id=? AND user_id=?',
           [
             payload['title'] ?? 'Compromiso',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['dueDate'] ?? payload['due_date'] ?? now,
             payload['status'] ?? 'pending',
             version,
@@ -1300,8 +1341,8 @@ class SyncService {
           'WHERE id=? AND user_id=?',
           [
             payload['title'] ?? 'Meta',
-            (payload['targetAmount'] ?? payload['target_amount'] as num?)?.toDouble() ?? 0.0,
-            (payload['savedAmount'] ?? payload['saved_amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
             id,
@@ -1372,7 +1413,7 @@ class SyncService {
           [
             payload['type'] ?? 'expense',
             payload['category'] ?? 'Otros',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['description'] ?? '',
             payload['date'] ?? now,
             (payload['recognized'] ?? true) == true ? 1 : 0,
@@ -1389,7 +1430,7 @@ class SyncService {
           'WHERE id=? AND user_id=?',
           [
             payload['title'] ?? 'Compromiso',
-            (payload['amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['amount']),
             payload['dueDate'] ?? payload['due_date'] ?? now,
             payload['status'] ?? 'pending',
             version,
@@ -1405,8 +1446,8 @@ class SyncService {
           'WHERE id=? AND user_id=?',
           [
             payload['title'] ?? 'Meta',
-            (payload['targetAmount'] ?? payload['target_amount'] as num?)?.toDouble() ?? 0.0,
-            (payload['savedAmount'] ?? payload['saved_amount'] as num?)?.toDouble() ?? 0.0,
+            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
             id,

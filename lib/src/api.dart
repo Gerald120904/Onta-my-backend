@@ -159,7 +159,7 @@ class Api {
         'id': user['id'],
         'name': user['name'],
         'email': user['email'],
-        'opening_balance': (user['opening_balance'] as num).toDouble(),
+        'opening_balance': _amount(user['opening_balance']),
       },
       'expires_at': expiresAt,
     });
@@ -200,7 +200,7 @@ class Api {
       'id': user['id'],
       'name': user['name'],
       'email': user['email'],
-      'opening_balance': (user['opening_balance'] as num).toDouble(),
+      'opening_balance': _amount(user['opening_balance']),
       'created_at': user['created_at'],
     });
   }
@@ -219,29 +219,36 @@ class Api {
     final user = rows.first;
     final now = DateTime.now().toIso8601String();
 
-    await database.execute(
-      'UPDATE users SET name=?, updated_at=? WHERE id=?',
-      [name, now, userId],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    // Record in sync engine for incremental pull & audit trail
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'user',
-      entityId: userId,
-      action: 'update',
-      version: 1,
-      payload: {'name': name},
-      previousValues: {'name': user['name']},
-    );
+      await tx.execute(
+        'UPDATE users SET name=?, updated_at=? WHERE id=?',
+        [name, now, userId],
+      );
 
-    return _json({
-      'id': user['id'],
-      'name': name,
-      'email': user['email'],
-      'opening_balance': (user['opening_balance'] as num).toDouble(),
-      'created_at': user['created_at'],
-      'updated_at': now,
+      // Record in sync engine for incremental pull & audit trail atomically
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'user',
+        entityId: userId,
+        action: 'update',
+        version: 1,
+        payload: {'name': name},
+        previousValues: {'name': user['name']},
+        executor: tx,
+      );
+
+      return _json({
+        'id': user['id'],
+        'name': name,
+        'email': user['email'],
+        'opening_balance': _amount(user['opening_balance']),
+        'created_at': user['created_at'],
+        'updated_at': now,
+      });
     });
   }
 
@@ -272,26 +279,34 @@ class Api {
 
     final newHash = database.hashPassword(newPassword);
     final now = DateTime.now().toIso8601String();
-    await database.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', [newHash, now, userId]);
-
     final currentToken = _token(request);
-    if (revokeOtherSessions && currentToken != null) {
-      await database.execute('DELETE FROM sessions WHERE user_id=? AND token != ?', [userId, currentToken]);
-    }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'user',
-      entityId: userId,
-      action: 'change_password',
-      version: 1,
-      payload: {'changed_password': true, 'sessions_revoked': revokeOtherSessions},
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    return _json({
-      'ok': true,
-      'message': 'Contraseña actualizada correctamente',
-      'sessions_revoked': revokeOtherSessions,
+      await tx.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', [newHash, now, userId]);
+
+      if (revokeOtherSessions && currentToken != null) {
+        await tx.execute('DELETE FROM sessions WHERE user_id=? AND token != ?', [userId, currentToken]);
+      }
+
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'user',
+        entityId: userId,
+        action: 'change_password',
+        version: 1,
+        payload: {'changed_password': true, 'sessions_revoked': revokeOtherSessions},
+        executor: tx,
+      );
+
+      return _json({
+        'ok': true,
+        'message': 'Contraseña actualizada correctamente',
+        'sessions_revoked': revokeOtherSessions,
+      });
     });
   }
 
@@ -306,7 +321,7 @@ class Api {
   Future<Response> _dashboard(Request request, String userId, [String? ignored]) async {
     final rows = await database.query('SELECT opening_balance FROM users WHERE id=?', [userId]);
     if (rows.isEmpty) return _json({'message': 'Usuario no encontrado'}, status: 404);
-    final openingBalance = (rows.first['opening_balance'] as num).toDouble();
+    final openingBalance = _amount(rows.first['opening_balance']);
 
     final income = await _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='income' AND deleted_at IS NULL", userId);
     final expenses = await _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='expense' AND deleted_at IS NULL", userId);
@@ -327,13 +342,13 @@ class Api {
       'committed': committed,
       'saved': saved,
       'available': balance - committed - saved,
-      'byCategory': [for (final r in categories) {'category': r['category'], 'total': (r['total'] as num?)?.toDouble() ?? 0.0}],
+      'byCategory': [for (final r in categories) {'category': r['category'], 'total': _amount(r['total'])}],
     });
   }
 
   Future<double> _sum(String sql, String userId) async {
     final rows = await database.query(sql, [userId]);
-    return rows.isNotEmpty ? (rows.first['total'] as num).toDouble() : 0.0;
+    return rows.isNotEmpty ? _amount(rows.first['total']) : 0.0;
   }
 
   double _amount(dynamic v) => v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '') ?? 0;
@@ -367,22 +382,29 @@ class Api {
       'recognized': (b['recognized'] ?? true) == true ? 1 : 0,
     };
 
-    await database.execute(
-      'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,?,?,?,1,?,NULL)',
-      [id, userId, payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], now],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'transaction',
-      entityId: id,
-      action: 'create',
-      version: 1,
-      payload: payload,
-    );
+      await tx.execute(
+        'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,?,?,?,1,?,NULL)',
+        [id, userId, payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], now],
+      );
 
-    return _json({'id': id, 'version': 1}, status: 201);
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'transaction',
+        entityId: id,
+        action: 'create',
+        version: 1,
+        payload: payload,
+        executor: tx,
+      );
+
+      return _json({'id': id, 'version': 1}, status: 201);
+    });
   }
 
   Future<Response> _updateTransaction(Request request, String userId, String id) async {
@@ -390,65 +412,79 @@ class Api {
     final amount = _amount(b['amount']);
     if (amount <= 0) return _json({'message': 'El monto debe ser mayor a ₡0'}, status: 400);
 
-    final existing = await database.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado'}, status: 404);
 
-    final payload = {
-      'type': b['type'] ?? current['type'],
-      'category': b['category'] ?? current['category'],
-      'amount': amount,
-      'description': b['description'] ?? current['description'],
-      'date': b['date'] ?? current['date'],
-      'recognized': (b['recognized'] ?? true) == true ? 1 : 0,
-    };
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await database.execute(
-      'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
-      'WHERE id=? AND user_id=?',
-      [payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], newVersion, now, id, userId],
-    );
+      final payload = {
+        'type': b['type'] ?? current['type'],
+        'category': b['category'] ?? current['category'],
+        'amount': amount,
+        'description': b['description'] ?? current['description'],
+        'date': b['date'] ?? current['date'],
+        'recognized': (b['recognized'] ?? true) == true ? 1 : 0,
+      };
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'transaction',
-      entityId: id,
-      action: 'update',
-      version: newVersion,
-      payload: payload,
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
+        'WHERE id=? AND user_id=?',
+        [payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Movimiento actualizado', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'transaction',
+        entityId: id,
+        action: 'update',
+        version: newVersion,
+        payload: payload,
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Movimiento actualizado', 'version': newVersion});
+    });
   }
 
   Future<Response> _deleteTransaction(Request request, String userId, String id) async {
-    final existing = await database.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado o ya eliminado'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado o ya eliminado'}, status: 404);
 
-    await database.execute(
-      'UPDATE transactions SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-      [now, newVersion, now, id, userId],
-    );
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'transaction',
-      entityId: id,
-      action: 'delete',
-      version: newVersion,
-      payload: {'deleted': true},
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE transactions SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+        [now, newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Movimiento eliminado', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'transaction',
+        entityId: id,
+        action: 'delete',
+        version: newVersion,
+        payload: {'deleted': true},
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Movimiento eliminado', 'version': newVersion});
+    });
   }
 
   // ==========================================
@@ -478,82 +514,103 @@ class Api {
       'status': b['status'] ?? 'pending',
     };
 
-    await database.execute(
-      'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,?,1,?,NULL)',
-      [id, userId, payload['title'], amount, payload['dueDate'], payload['status'], now],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'commitment',
-      entityId: id,
-      action: 'create',
-      version: 1,
-      payload: payload,
-    );
+      await tx.execute(
+        'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,?,1,?,NULL)',
+        [id, userId, payload['title'], amount, payload['dueDate'], payload['status'], now],
+      );
 
-    return _json({'id': id, 'version': 1}, status: 201);
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'commitment',
+        entityId: id,
+        action: 'create',
+        version: 1,
+        payload: payload,
+        executor: tx,
+      );
+
+      return _json({'id': id, 'version': 1}, status: 201);
+    });
   }
 
   Future<Response> _updateCommitment(Request request, String userId, String id) async {
     final b = await _body(request);
-    final existing = await database.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
 
-    final payload = {
-      'title': b['title'] ?? current['title'],
-      'amount': _amount(b['amount']),
-      'dueDate': b['dueDate'] ?? b['due_date'] ?? current['due_date'],
-      'status': b['status'] ?? current['status'],
-    };
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await database.execute(
-      'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-      [payload['title'], payload['amount'], payload['dueDate'], payload['status'], newVersion, now, id, userId],
-    );
+      final payload = {
+        'title': b['title'] ?? current['title'],
+        'amount': _amount(b['amount']),
+        'dueDate': b['dueDate'] ?? b['due_date'] ?? current['due_date'],
+        'status': b['status'] ?? current['status'],
+      };
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'commitment',
-      entityId: id,
-      action: 'update',
-      version: newVersion,
-      payload: payload,
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+        [payload['title'], payload['amount'], payload['dueDate'], payload['status'], newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Compromiso actualizado', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'commitment',
+        entityId: id,
+        action: 'update',
+        version: newVersion,
+        payload: payload,
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Compromiso actualizado', 'version': newVersion});
+    });
   }
 
   Future<Response> _deleteCommitment(Request request, String userId, String id) async {
-    final existing = await database.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
 
-    await database.execute(
-      'UPDATE commitments SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-      [now, newVersion, now, id, userId],
-    );
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'commitment',
-      entityId: id,
-      action: 'delete',
-      version: newVersion,
-      payload: {'deleted': true},
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE commitments SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+        [now, newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Compromiso eliminado', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'commitment',
+        entityId: id,
+        action: 'delete',
+        version: newVersion,
+        payload: {'deleted': true},
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Compromiso eliminado', 'version': newVersion});
+    });
   }
 
   // ==========================================
@@ -579,81 +636,102 @@ class Api {
       'savedAmount': _amount(b['savedAmount'] ?? b['saved_amount']),
     };
 
-    await database.execute(
-      'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,1,?,NULL)',
-      [id, userId, payload['title'], payload['targetAmount'], payload['savedAmount'], now],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'goal',
-      entityId: id,
-      action: 'create',
-      version: 1,
-      payload: payload,
-    );
+      await tx.execute(
+        'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,1,?,NULL)',
+        [id, userId, payload['title'], payload['targetAmount'], payload['savedAmount'], now],
+      );
 
-    return _json({'id': id, 'version': 1}, status: 201);
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'goal',
+        entityId: id,
+        action: 'create',
+        version: 1,
+        payload: payload,
+        executor: tx,
+      );
+
+      return _json({'id': id, 'version': 1}, status: 201);
+    });
   }
 
   Future<Response> _updateGoal(Request request, String userId, String id) async {
     final b = await _body(request);
-    final existing = await database.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
 
-    final payload = {
-      'title': b['title'] ?? current['title'],
-      'targetAmount': _amount(b['targetAmount'] ?? b['target_amount'] ?? current['target_amount']),
-      'savedAmount': _amount(b['savedAmount'] ?? b['saved_amount'] ?? current['saved_amount']),
-    };
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await database.execute(
-      'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-      [payload['title'], payload['targetAmount'], payload['savedAmount'], newVersion, now, id, userId],
-    );
+      final payload = {
+        'title': b['title'] ?? current['title'],
+        'targetAmount': _amount(b['targetAmount'] ?? b['target_amount'] ?? current['target_amount']),
+        'savedAmount': _amount(b['savedAmount'] ?? b['saved_amount'] ?? current['saved_amount']),
+      };
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'goal',
-      entityId: id,
-      action: 'update',
-      version: newVersion,
-      payload: payload,
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+        [payload['title'], payload['targetAmount'], payload['savedAmount'], newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Meta actualizada', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'goal',
+        entityId: id,
+        action: 'update',
+        version: newVersion,
+        payload: payload,
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Meta actualizada', 'version': newVersion});
+    });
   }
 
   Future<Response> _deleteGoal(Request request, String userId, String id) async {
-    final existing = await database.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
-    if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    final current = existing.first;
-    final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
-    final now = DateTime.now().toIso8601String();
+      final existing = await tx.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+      if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
 
-    await database.execute(
-      'UPDATE goals SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-      [now, newVersion, now, id, userId],
-    );
+      final current = existing.first;
+      final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
+      final now = DateTime.now().toIso8601String();
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'goal',
-      entityId: id,
-      action: 'delete',
-      version: newVersion,
-      payload: {'deleted': true},
-      previousValues: Map<String, dynamic>.from(current),
-    );
+      await tx.execute(
+        'UPDATE goals SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+        [now, newVersion, now, id, userId],
+      );
 
-    return _json({'message': 'Meta eliminada', 'version': newVersion});
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'goal',
+        entityId: id,
+        action: 'delete',
+        version: newVersion,
+        payload: {'deleted': true},
+        previousValues: Map<String, dynamic>.from(current),
+        executor: tx,
+      );
+
+      return _json({'message': 'Meta eliminada', 'version': newVersion});
+    });
   }
 
   // ==========================================
@@ -673,22 +751,29 @@ class Api {
       'created_at': now,
     };
 
-    await database.execute(
-      'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,1,?,NULL)',
-      [id, userId, action, payload['note'], now, now],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'decision',
-      entityId: id,
-      action: 'create',
-      version: 1,
-      payload: payload,
-    );
+      await tx.execute(
+        'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,1,?,NULL)',
+        [id, userId, action, payload['note'], now, now],
+      );
 
-    return _json({'message': 'Decisión guardada', 'id': id, 'version': 1}, status: 201);
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'decision',
+        entityId: id,
+        action: 'create',
+        version: 1,
+        payload: payload,
+        executor: tx,
+      );
+
+      return _json({'message': 'Decisión guardada', 'id': id, 'version': 1}, status: 201);
+    });
   }
 
   Future<Response> _reviews(Request request, String userId, [String? ignored]) async {
@@ -730,34 +815,41 @@ class Api {
       'createdAt': b['createdAt'] ?? now,
     };
 
-    await database.execute(
-      'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,?,?,?,?,?,1,?,NULL)',
-      [
-        id,
-        userId,
-        payload['start'],
-        payload['end'],
-        payload['periodTitle'],
-        payload['periodSubtitle'],
-        jsonEncode(payload['transactionIds']),
-        payload['decision'],
-        jsonEncode(payload['decisionDetails']),
-        payload['createdAt'],
-        now,
-      ],
-    );
+    return await database.transaction((tx) async {
+      if (database.isPostgres) {
+        await tx.execute('SELECT pg_advisory_xact_lock(hashtext(?))', ['sync_$userId']);
+      }
 
-    await syncService.recordChangeAsync(
-      userId: userId,
-      entityType: 'review',
-      entityId: id,
-      action: 'create',
-      version: 1,
-      payload: payload,
-    );
+      await tx.execute(
+        'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,1,?,NULL)',
+        [
+          id,
+          userId,
+          payload['start'],
+          payload['end'],
+          payload['periodTitle'],
+          payload['periodSubtitle'],
+          jsonEncode(payload['transactionIds']),
+          payload['decision'],
+          jsonEncode(payload['decisionDetails']),
+          payload['createdAt'],
+          now,
+        ],
+      );
 
-    return _json({'message': 'Revisión guardada', 'id': id, 'version': 1}, status: 201);
+      await syncService.recordChangeAsync(
+        userId: userId,
+        entityType: 'review',
+        entityId: id,
+        action: 'create',
+        version: 1,
+        payload: payload,
+        executor: tx,
+      );
+
+      return _json({'message': 'Revisión guardada', 'id': id, 'version': 1}, status: 201);
+    });
   }
 
   // ==========================================

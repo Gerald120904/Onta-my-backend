@@ -157,7 +157,7 @@ class SqliteAppDatabase extends AppDatabase {
         name TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        opening_balance REAL NOT NULL DEFAULT 0,
+        opening_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT,
         version INTEGER NOT NULL DEFAULT 1
@@ -173,7 +173,7 @@ class SqliteAppDatabase extends AppDatabase {
         user_id TEXT NOT NULL,
         type TEXT NOT NULL,
         category TEXT NOT NULL,
-        amount REAL NOT NULL,
+        amount NUMERIC(18,2) NOT NULL,
         description TEXT NOT NULL,
         date TEXT NOT NULL,
         recognized INTEGER NOT NULL DEFAULT 1,
@@ -185,7 +185,7 @@ class SqliteAppDatabase extends AppDatabase {
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         title TEXT NOT NULL,
-        amount REAL NOT NULL,
+        amount NUMERIC(18,2) NOT NULL,
         due_date TEXT NOT NULL,
         status TEXT NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
@@ -196,8 +196,8 @@ class SqliteAppDatabase extends AppDatabase {
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         title TEXT NOT NULL,
-        target_amount REAL NOT NULL,
-        saved_amount REAL NOT NULL,
+        target_amount NUMERIC(18,2) NOT NULL,
+        saved_amount NUMERIC(18,2) NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
         updated_at TEXT,
         deleted_at TEXT
@@ -291,7 +291,7 @@ class SqliteAppDatabase extends AppDatabase {
   @override
   Future<List<Map<String, dynamic>>> query(String sql, [List<dynamic>? params]) async {
     final resultSet = _sqliteDb.select(sql, params ?? const []);
-    return resultSet.map((row) => Map<String, dynamic>.from(row)).toList();
+    return resultSet.map((row) => PostgresAppDatabase.normalizeRow(Map<String, dynamic>.from(row))).toList();
   }
 
   @override
@@ -527,12 +527,15 @@ class PostgresAppDatabase extends AppDatabase {
       password: password,
     );
 
+    final sslModeParam = uri.queryParameters['sslmode']?.toLowerCase();
+    final SslMode sslMode = (sslModeParam == 'disable') ? SslMode.disable : SslMode.require;
+
     // Neon exige conexión cifrada TLS y pool de conexiones apropiado al plan Free
     final pool = Pool.withEndpoints(
       [endpoint],
       settings: PoolSettings(
         maxConnectionCount: 5,
-        sslMode: SslMode.require,
+        sslMode: sslMode,
       ),
     );
 
@@ -550,6 +553,36 @@ class PostgresAppDatabase extends AppDatabase {
         'Acceso directo síncrono no soportado en PostgreSQL. Utilice query(), execute() o transaction().',
       );
 
+  /// Normaliza valores numéricos y exactos de las filas para asegurar compatibilidad con JSON y frontend.
+  static Map<String, dynamic> normalizeRow(Map<String, dynamic> row) {
+    final out = <String, dynamic>{};
+    for (final entry in row.entries) {
+      final k = entry.key;
+      final v = entry.value;
+      if (v != null &&
+          (k == 'amount' ||
+           k == 'opening_balance' ||
+           k == 'target_amount' ||
+           k == 'saved_amount' ||
+           k == 'total' ||
+           k == 'income' ||
+           k == 'expenses' ||
+           k == 'balance' ||
+           k == 'committed' ||
+           k == 'saved' ||
+           k == 'available')) {
+        if (v is num) {
+          out[k] = v.toDouble();
+        } else {
+          out[k] = double.tryParse(v.toString()) ?? v;
+        }
+      } else {
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+
   /// Convierte los marcadores '?' de estilo SQLite a los marcadores '$1, $2, ...' de PostgreSQL.
   static String convertPlaceholders(String sql) {
     int index = 1;
@@ -560,7 +593,7 @@ class PostgresAppDatabase extends AppDatabase {
   Future<List<Map<String, dynamic>>> query(String sql, [List<dynamic>? params]) async {
     final pgSql = convertPlaceholders(sql);
     final result = await _pool.execute(Sql(pgSql), parameters: params ?? const []);
-    return result.map((row) => row.toColumnMap()).toList();
+    return result.map((row) => normalizeRow(row.toColumnMap())).toList();
   }
 
   @override
@@ -774,7 +807,7 @@ class _PostgresSessionExecutor implements DatabaseExecutor {
   Future<List<Map<String, dynamic>>> query(String sql, [List<dynamic>? params]) async {
     final pgSql = PostgresAppDatabase.convertPlaceholders(sql);
     final result = await _session.execute(Sql(pgSql), parameters: params ?? const []);
-    return result.map((row) => row.toColumnMap()).toList();
+    return result.map((row) => PostgresAppDatabase.normalizeRow(row.toColumnMap())).toList();
   }
 
   @override
