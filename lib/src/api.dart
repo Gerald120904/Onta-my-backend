@@ -22,6 +22,9 @@ class Api {
     r.post('/api/auth/register', _register);
     r.post('/api/auth/logout', _auth(_logout));
     r.get('/api/auth/me', _auth(_currentUser));
+    r.get('/api/me', _auth(_currentUser));
+    r.patch('/api/me', _auth(_updateProfile));
+    r.post('/api/me/change-password', _auth(_changePassword));
 
     // Dashboard
     r.get('/api/dashboard', _auth(_dashboard));
@@ -104,6 +107,7 @@ class Api {
         'dashboard',
         'me',
         'logout',
+        'change-password',
       };
 
       if (route.isNotEmpty && !nonEntityRoutes.contains(route.last)) {
@@ -196,6 +200,96 @@ class Api {
       'email': user['email'],
       'opening_balance': (user['opening_balance'] as num).toDouble(),
       'created_at': user['created_at'],
+    });
+  }
+
+  Future<Response> _updateProfile(Request request, String userId, [String? ignored]) async {
+    final b = await _body(request);
+    final name = (b['name'] ?? '').toString().trim();
+    if (name.isEmpty) {
+      return _json({'message': 'El nombre no puede estar vacío'}, status: 400);
+    }
+    final rows = database.db.select(
+      'SELECT id, name, email, opening_balance, created_at FROM users WHERE id=?',
+      [userId],
+    );
+    if (rows.isEmpty) return _json({'message': 'Usuario no encontrado'}, status: 404);
+    final user = rows.first;
+    final now = DateTime.now().toIso8601String();
+
+    database.db.execute(
+      'UPDATE users SET name=?, updated_at=? WHERE id=?',
+      [name, now, userId],
+    );
+
+    // Record in sync engine for incremental pull & audit trail
+    syncService.recordChange(
+      userId: userId,
+      entityType: 'user',
+      entityId: userId,
+      action: 'update',
+      version: 1,
+      payload: {'name': name},
+      previousValues: {'name': user['name']},
+    );
+
+    return _json({
+      'id': user['id'],
+      'name': name,
+      'email': user['email'],
+      'opening_balance': (user['opening_balance'] as num).toDouble(),
+      'created_at': user['created_at'],
+      'updated_at': now,
+    });
+  }
+
+  Future<Response> _changePassword(Request request, String userId, [String? ignored]) async {
+    final b = await _body(request);
+    final currentPassword = (b['current_password'] ?? '').toString();
+    final newPassword = (b['new_password'] ?? '').toString();
+    final confirmPassword = (b['confirm_password'] ?? '').toString();
+    final revokeOtherSessions = b['revoke_other_sessions'] == true || b['revoke_other_sessions'] == null;
+
+    if (currentPassword.isEmpty) {
+      return _json({'message': 'Debes ingresar tu contraseña actual'}, status: 400);
+    }
+    if (newPassword.length < 6) {
+      return _json({'message': 'La nueva contraseña debe tener al menos 6 caracteres'}, status: 400);
+    }
+    if (newPassword != confirmPassword) {
+      return _json({'message': 'La confirmación de la contraseña no coincide'}, status: 400);
+    }
+
+    final rows = database.db.select('SELECT id, password_hash FROM users WHERE id=?', [userId]);
+    if (rows.isEmpty) return _json({'message': 'Usuario no encontrado'}, status: 404);
+
+    final storedHash = rows.first['password_hash'] as String;
+    if (!database.verifyPassword(currentPassword, storedHash)) {
+      return _json({'message': 'La contraseña actual no es correcta'}, status: 400);
+    }
+
+    final newHash = database.hashPassword(newPassword);
+    final now = DateTime.now().toIso8601String();
+    database.db.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', [newHash, now, userId]);
+
+    final currentToken = _token(request);
+    if (revokeOtherSessions && currentToken != null) {
+      database.db.execute('DELETE FROM sessions WHERE user_id=? AND token != ?', [userId, currentToken]);
+    }
+
+    syncService.recordChange(
+      userId: userId,
+      entityType: 'user',
+      entityId: userId,
+      action: 'change_password',
+      version: 1,
+      payload: {'changed_password': true, 'sessions_revoked': revokeOtherSessions},
+    );
+
+    return _json({
+      'ok': true,
+      'message': 'Contraseña actualizada correctamente',
+      'sessions_revoked': revokeOtherSessions,
     });
   }
 

@@ -507,6 +507,10 @@ class SyncService {
       case 'review':
       case 'reviews':
         return 'reviews';
+      case 'user':
+      case 'users':
+      case 'profile':
+        return 'users';
       default:
         return null;
     }
@@ -695,6 +699,17 @@ class SyncService {
             now,
             id,
             userId,
+          ],
+        );
+        break;
+      case 'users':
+        database.db.execute(
+          'UPDATE users SET name=?, updated_at=?, version=? WHERE id=?',
+          [
+            payload['name'] ?? '',
+            now,
+            version,
+            id,
           ],
         );
         break;

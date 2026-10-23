@@ -187,6 +187,7 @@ class AppDatabase {
       _addColumnIfNotExists(table, 'deleted_at', 'TEXT');
     }
     _addColumnIfNotExists('users', 'updated_at', 'TEXT');
+    _addColumnIfNotExists('users', 'version', 'INTEGER NOT NULL DEFAULT 1');
     backfillSyncLog();
   }
 

@@ -1,0 +1,39 @@
+# Archivos de Dart y herramientas de compilación
+.dart_tool/
+.packages
+build/
+
+# Bases de datos SQLite, backups y archivos WAL/SHM
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.backup
+*.bak
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
+
+# Variables de entorno y credenciales
+.env
+.env.*
+*.key
+*.pem
+*.cert
+*.p12
+
+# Logs y temporales
+*.log
+.temp/
+tmp/
+scratch/
+
+# Sistema operativo e IDEs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
