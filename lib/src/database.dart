@@ -127,7 +127,7 @@ class AppDatabase {
         decision_details TEXT NOT NULL,
         created_at TEXT NOT NULL,
         version INTEGER NOT NULL DEFAULT 1,
-        updated_at TEXT NOT NULL,
+        updated_at TEXT,
         deleted_at TEXT
       );
       CREATE TABLE IF NOT EXISTS sync_log(
@@ -181,16 +181,16 @@ class AppDatabase {
     // Safe, non-destructive column additions for existing installations
     _addColumnIfNotExists('sessions', 'expires_at', "TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
 
-    for (final table in ['transactions', 'commitments', 'goals', 'decisions']) {
+    for (final table in ['transactions', 'commitments', 'goals', 'decisions', 'reviews']) {
       _addColumnIfNotExists(table, 'version', 'INTEGER NOT NULL DEFAULT 1');
       _addColumnIfNotExists(table, 'updated_at', 'TEXT');
       _addColumnIfNotExists(table, 'deleted_at', 'TEXT');
     }
     _addColumnIfNotExists('users', 'updated_at', 'TEXT');
-    _backfillSyncLog();
+    backfillSyncLog();
   }
 
-  void _backfillSyncLog() {
+  void backfillSyncLog() {
     try {
       final txs = db.select(
         "SELECT * FROM transactions WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='transaction')",
@@ -243,6 +243,52 @@ class AppDatabase {
           [g['user_id'], 'goal', g['id'], 'create', g['version'] ?? 1, payload, now],
         );
       }
+
+      final decisions = db.select(
+        "SELECT * FROM decisions WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='decision')",
+      );
+      for (final d in decisions) {
+        final now = (d['updated_at'] ?? d['created_at'] ?? DateTime.now().toIso8601String()).toString();
+        final payload = jsonEncode({
+          'action': d['action'],
+          'note': d['note'],
+          'created_at': d['created_at'],
+        });
+        db.execute(
+          'INSERT INTO sync_log(user_id, entity_type, entity_id, action, version, payload, created_at) VALUES(?,?,?,?,?,?,?)',
+          [d['user_id'], 'decision', d['id'], 'create', d['version'] ?? 1, payload, now],
+        );
+      }
+
+      final reviews = db.select(
+        "SELECT * FROM reviews WHERE deleted_at IS NULL AND id NOT IN (SELECT entity_id FROM sync_log WHERE entity_type='review')",
+      );
+      for (final r in reviews) {
+        final now = (r['updated_at'] ?? r['created_at'] ?? DateTime.now().toIso8601String()).toString();
+        List<dynamic> txIds = [];
+        Map<String, dynamic> details = {};
+        try {
+          txIds = jsonDecode(r['transaction_ids'] as String? ?? '[]') as List;
+        } catch (_) {}
+        try {
+          details = jsonDecode(r['decision_details'] as String? ?? '{}') as Map<String, dynamic>;
+        } catch (_) {}
+
+        final payload = jsonEncode({
+          'start': r['start_date'],
+          'end': r['end_date'],
+          'periodTitle': r['period_title'],
+          'periodSubtitle': r['period_subtitle'],
+          'transactionIds': txIds,
+          'decision': r['decision'],
+          'decisionDetails': details,
+          'createdAt': r['created_at'],
+        });
+        db.execute(
+          'INSERT INTO sync_log(user_id, entity_type, entity_id, action, version, payload, created_at) VALUES(?,?,?,?,?,?,?)',
+          [r['user_id'], 'review', r['id'], 'create', r['version'] ?? 1, payload, now],
+        );
+      }
     } catch (_) {}
   }
 
@@ -276,6 +322,9 @@ class AppDatabase {
       'INSERT INTO goals(id,user_id,title,target_amount,saved_amount,version,updated_at) VALUES(?,?,?,?,?,?,?)',
       [uuid.v4(), userId, 'Ahorro reservado', 100000.0, 20000.0, 1, now],
     );
+
+    // Sincronizar inmediatamente los registros generados por seed()
+    backfillSyncLog();
   }
 
   String? userIdFromToken(String? token) {
