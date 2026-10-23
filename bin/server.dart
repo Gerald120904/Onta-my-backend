@@ -18,7 +18,7 @@ Middleware corsMiddleware({required bool isProduction, String? allowedOriginOver
 
       if (isProduction) {
         // En producción NO se permite comodín '*'
-        // Se valida estrictamente contra la lista blanca configurada en ALLOWED_ORIGIN
+        // Se valida estrictamente contra la lista blanca configurada en ALLOWED_ORIGIN (ej. Cloudflare Pages)
         if (originHeader != null && allowedOrigins.contains(originHeader) && originHeader != '*') {
           allowOrigin = originHeader;
         } else {
@@ -66,13 +66,23 @@ Future<void> main() async {
       'development';
   final isProduction = env == 'production' || env == 'prod';
 
-  // Desactivación obligatoria de la cuenta de demostración en producción
+  // Desactivación incondicional de la cuenta de demostración en producción
   final allowSeed = !isProduction && (Platform.environment['SEED_DEMO_USER']?.toLowerCase() != 'false');
 
+  final databaseUrl = Platform.environment['DATABASE_URL'];
   final dbPath = Platform.environment['DATABASE_PATH'];
-  final db = AppDatabase.open(customPath: dbPath);
+
+  final AppDatabase db;
+  if (databaseUrl != null && databaseUrl.trim().isNotEmpty) {
+    print('Conectando a base de datos PostgreSQL en la nube...');
+    db = await AppDatabase.openAsync(databaseUrl: databaseUrl);
+  } else {
+    print('Iniciando base de datos SQLite local...');
+    db = AppDatabase.open(customPath: dbPath);
+  }
+
   if (allowSeed) {
-    db.seed();
+    await db.seed();
   }
 
   final handler = Pipeline()
@@ -92,16 +102,17 @@ Future<void> main() async {
   print('========================================');
   print(' API ¿Dónde se fue mi plata?');
   print(' Servidor escuchando en: http://${server.address.host}:${server.port}');
-  print(' Base de datos: ${dbPath ?? "data/plata.db"}');
+  print(' Motor de persistencia: ${db.isPostgres ? "PostgreSQL (Neon TLS)" : (dbPath ?? "SQLite data/plata.db")}');
+  print(' Entorno: $env (Producción: $isProduction)');
   print(' Puerto activo: ${server.port}');
   print('========================================');
   print('');
 
-  // Handle graceful shutdown
+  // Manejo de apagado ordenado
   ProcessSignal.sigint.watch().listen((_) async {
     print('\nCerrando servidor...');
     await server.close(force: true);
-    db.close();
+    await db.close();
     print('Servidor cerrado.');
     exit(0);
   });

@@ -66,6 +66,7 @@ class Api {
     return _json({
       'ok': true,
       'status': 'healthy',
+      'engine': database.isPostgres ? 'postgresql-neon' : 'sqlite3-local',
       'timestamp': DateTime.now().toIso8601String(),
     });
   }
@@ -89,7 +90,7 @@ class Api {
   Handler _auth(Function callback) {
     return (Request request) async {
       final token = _token(request);
-      final userId = database.userIdFromToken(token);
+      final userId = await database.userIdFromTokenAsync(token);
       if (userId == null) {
         return _json({'message': 'Sesión inválida o expirada'}, status: 401);
       }
@@ -122,7 +123,7 @@ class Api {
     final email = (b['email'] ?? '').toString().trim().toLowerCase();
     final password = (b['password'] ?? '').toString();
 
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, name, email, password_hash, opening_balance FROM users WHERE email=?',
       [email],
     );
@@ -140,14 +141,14 @@ class Api {
 
     // Transparent progressive migration from legacy SHA-256 to BCrypt
     if (database.isLegacyHash(storedHash)) {
-      database.upgradePasswordHash(user['id'] as String, password);
+      await database.upgradePasswordHash(user['id'] as String, password);
     }
 
     final token = _uuid.v4();
     final now = DateTime.now();
     final expiresAt = now.add(const Duration(days: 30)).toIso8601String();
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)',
       [token, user['id'], now.toIso8601String(), expiresAt],
     );
@@ -174,13 +175,14 @@ class Api {
     if (name.isEmpty || !email.contains('@') || password.length < 6) {
       return _json({'message': 'Datos inválidos. La contraseña debe tener al menos 6 caracteres.'}, status: 400);
     }
-    if (database.db.select('SELECT id FROM users WHERE email=?', [email]).isNotEmpty) {
+    final existing = await database.query('SELECT id FROM users WHERE email=?', [email]);
+    if (existing.isNotEmpty) {
       return _json({'message': 'El correo ya existe'}, status: 409);
     }
 
     final id = _uuid.v4();
     final now = DateTime.now().toIso8601String();
-    database.db.execute(
+    await database.execute(
       'INSERT INTO users(id, name, email, password_hash, opening_balance, created_at, updated_at) VALUES(?,?,?,?,?,?,?)',
       [id, name, email, database.hashPassword(password), openingBalance, now, now],
     );
@@ -188,7 +190,7 @@ class Api {
   }
 
   Future<Response> _currentUser(Request request, String userId, [String? ignored]) async {
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, name, email, opening_balance, created_at FROM users WHERE id=?',
       [userId],
     );
@@ -209,7 +211,7 @@ class Api {
     if (name.isEmpty) {
       return _json({'message': 'El nombre no puede estar vacío'}, status: 400);
     }
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, name, email, opening_balance, created_at FROM users WHERE id=?',
       [userId],
     );
@@ -217,13 +219,13 @@ class Api {
     final user = rows.first;
     final now = DateTime.now().toIso8601String();
 
-    database.db.execute(
+    await database.execute(
       'UPDATE users SET name=?, updated_at=? WHERE id=?',
       [name, now, userId],
     );
 
     // Record in sync engine for incremental pull & audit trail
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'user',
       entityId: userId,
@@ -260,7 +262,7 @@ class Api {
       return _json({'message': 'La confirmación de la contraseña no coincide'}, status: 400);
     }
 
-    final rows = database.db.select('SELECT id, password_hash FROM users WHERE id=?', [userId]);
+    final rows = await database.query('SELECT id, password_hash FROM users WHERE id=?', [userId]);
     if (rows.isEmpty) return _json({'message': 'Usuario no encontrado'}, status: 404);
 
     final storedHash = rows.first['password_hash'] as String;
@@ -270,14 +272,14 @@ class Api {
 
     final newHash = database.hashPassword(newPassword);
     final now = DateTime.now().toIso8601String();
-    database.db.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', [newHash, now, userId]);
+    await database.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', [newHash, now, userId]);
 
     final currentToken = _token(request);
     if (revokeOtherSessions && currentToken != null) {
-      database.db.execute('DELETE FROM sessions WHERE user_id=? AND token != ?', [userId, currentToken]);
+      await database.execute('DELETE FROM sessions WHERE user_id=? AND token != ?', [userId, currentToken]);
     }
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'user',
       entityId: userId,
@@ -296,22 +298,23 @@ class Api {
   Future<Response> _logout(Request request, String userId, [String? ignored]) async {
     final token = _token(request);
     if (token != null) {
-      database.db.execute('DELETE FROM sessions WHERE token=?', [token]);
+      await database.execute('DELETE FROM sessions WHERE token=?', [token]);
     }
     return _json({'message': 'Sesión cerrada exitosamente'});
   }
 
   Future<Response> _dashboard(Request request, String userId, [String? ignored]) async {
-    final user = database.db.select('SELECT opening_balance FROM users WHERE id=?', [userId]).first;
-    final openingBalance = (user['opening_balance'] as num).toDouble();
+    final rows = await database.query('SELECT opening_balance FROM users WHERE id=?', [userId]);
+    if (rows.isEmpty) return _json({'message': 'Usuario no encontrado'}, status: 404);
+    final openingBalance = (rows.first['opening_balance'] as num).toDouble();
 
-    final income = _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='income' AND deleted_at IS NULL", userId);
-    final expenses = _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='expense' AND deleted_at IS NULL", userId);
-    final committed = _sum("SELECT COALESCE(SUM(amount),0) total FROM commitments WHERE user_id=? AND status='pending' AND deleted_at IS NULL", userId);
-    final saved = _sum("SELECT COALESCE(SUM(saved_amount),0) total FROM goals WHERE user_id=? AND deleted_at IS NULL", userId);
+    final income = await _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='income' AND deleted_at IS NULL", userId);
+    final expenses = await _sum("SELECT COALESCE(SUM(amount),0) total FROM transactions WHERE user_id=? AND type='expense' AND deleted_at IS NULL", userId);
+    final committed = await _sum("SELECT COALESCE(SUM(amount),0) total FROM commitments WHERE user_id=? AND status='pending' AND deleted_at IS NULL", userId);
+    final saved = await _sum("SELECT COALESCE(SUM(saved_amount),0) total FROM goals WHERE user_id=? AND deleted_at IS NULL", userId);
 
     final balance = openingBalance + income - expenses;
-    final categories = database.db.select(
+    final categories = await database.query(
       "SELECT category, SUM(amount) total FROM transactions WHERE user_id=? AND type='expense' AND deleted_at IS NULL GROUP BY category ORDER BY total DESC",
       [userId],
     );
@@ -324,11 +327,15 @@ class Api {
       'committed': committed,
       'saved': saved,
       'available': balance - committed - saved,
-      'byCategory': [for (final r in categories) {'category': r['category'], 'total': r['total']}],
+      'byCategory': [for (final r in categories) {'category': r['category'], 'total': (r['total'] as num?)?.toDouble() ?? 0.0}],
     });
   }
 
-  double _sum(String sql, String userId) => (database.db.select(sql, [userId]).first['total'] as num).toDouble();
+  Future<double> _sum(String sql, String userId) async {
+    final rows = await database.query(sql, [userId]);
+    return rows.isNotEmpty ? (rows.first['total'] as num).toDouble() : 0.0;
+  }
+
   double _amount(dynamic v) => v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '') ?? 0;
 
   // ==========================================
@@ -336,7 +343,7 @@ class Api {
   // ==========================================
 
   Future<Response> _transactions(Request request, String userId, [String? ignored]) async {
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, user_id, type, category, amount, description, date, recognized, version, updated_at '
       'FROM transactions WHERE user_id=? AND deleted_at IS NULL ORDER BY date DESC',
       [userId],
@@ -360,13 +367,13 @@ class Api {
       'recognized': (b['recognized'] ?? true) == true ? 1 : 0,
     };
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at) '
       'VALUES(?,?,?,?,?,?,?,?,1,?,NULL)',
       [id, userId, payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], now],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'transaction',
       entityId: id,
@@ -383,7 +390,7 @@ class Api {
     final amount = _amount(b['amount']);
     if (amount <= 0) return _json({'message': 'El monto debe ser mayor a ₡0'}, status: 400);
 
-    final existing = database.db.select('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado'}, status: 404);
 
     final current = existing.first;
@@ -399,13 +406,13 @@ class Api {
       'recognized': (b['recognized'] ?? true) == true ? 1 : 0,
     };
 
-    database.db.execute(
+    await database.execute(
       'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
       'WHERE id=? AND user_id=?',
       [payload['type'], payload['category'], amount, payload['description'], payload['date'], payload['recognized'], newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'transaction',
       entityId: id,
@@ -419,19 +426,19 @@ class Api {
   }
 
   Future<Response> _deleteTransaction(Request request, String userId, String id) async {
-    final existing = database.db.select('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM transactions WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Movimiento no encontrado o ya eliminado'}, status: 404);
 
     final current = existing.first;
     final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
     final now = DateTime.now().toIso8601String();
 
-    database.db.execute(
+    await database.execute(
       'UPDATE transactions SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
       [now, newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'transaction',
       entityId: id,
@@ -449,7 +456,7 @@ class Api {
   // ==========================================
 
   Future<Response> _commitments(Request request, String userId, [String? ignored]) async {
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, user_id, title, amount, due_date, status, version, updated_at '
       'FROM commitments WHERE user_id=? AND deleted_at IS NULL ORDER BY due_date',
       [userId],
@@ -471,13 +478,13 @@ class Api {
       'status': b['status'] ?? 'pending',
     };
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at) '
       'VALUES(?,?,?,?,?,?,1,?,NULL)',
       [id, userId, payload['title'], amount, payload['dueDate'], payload['status'], now],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'commitment',
       entityId: id,
@@ -491,7 +498,7 @@ class Api {
 
   Future<Response> _updateCommitment(Request request, String userId, String id) async {
     final b = await _body(request);
-    final existing = database.db.select('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
 
     final current = existing.first;
@@ -505,12 +512,12 @@ class Api {
       'status': b['status'] ?? current['status'],
     };
 
-    database.db.execute(
+    await database.execute(
       'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? WHERE id=? AND user_id=?',
       [payload['title'], payload['amount'], payload['dueDate'], payload['status'], newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'commitment',
       entityId: id,
@@ -524,19 +531,19 @@ class Api {
   }
 
   Future<Response> _deleteCommitment(Request request, String userId, String id) async {
-    final existing = database.db.select('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM commitments WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Compromiso no encontrado'}, status: 404);
 
     final current = existing.first;
     final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
     final now = DateTime.now().toIso8601String();
 
-    database.db.execute(
+    await database.execute(
       'UPDATE commitments SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
       [now, newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'commitment',
       entityId: id,
@@ -554,7 +561,7 @@ class Api {
   // ==========================================
 
   Future<Response> _goals(Request request, String userId, [String? ignored]) async {
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, user_id, title, target_amount, saved_amount, version, updated_at '
       'FROM goals WHERE user_id=? AND deleted_at IS NULL ORDER BY title',
       [userId],
@@ -572,13 +579,13 @@ class Api {
       'savedAmount': _amount(b['savedAmount'] ?? b['saved_amount']),
     };
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at) '
       'VALUES(?,?,?,?,?,1,?,NULL)',
       [id, userId, payload['title'], payload['targetAmount'], payload['savedAmount'], now],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'goal',
       entityId: id,
@@ -592,7 +599,7 @@ class Api {
 
   Future<Response> _updateGoal(Request request, String userId, String id) async {
     final b = await _body(request);
-    final existing = database.db.select('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
 
     final current = existing.first;
@@ -605,12 +612,12 @@ class Api {
       'savedAmount': _amount(b['savedAmount'] ?? b['saved_amount'] ?? current['saved_amount']),
     };
 
-    database.db.execute(
+    await database.execute(
       'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? WHERE id=? AND user_id=?',
       [payload['title'], payload['targetAmount'], payload['savedAmount'], newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'goal',
       entityId: id,
@@ -624,19 +631,19 @@ class Api {
   }
 
   Future<Response> _deleteGoal(Request request, String userId, String id) async {
-    final existing = database.db.select('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
+    final existing = await database.query('SELECT * FROM goals WHERE id=? AND user_id=? AND deleted_at IS NULL', [id, userId]);
     if (existing.isEmpty) return _json({'message': 'Meta no encontrada'}, status: 404);
 
     final current = existing.first;
     final newVersion = ((current['version'] as num?)?.toInt() ?? 1) + 1;
     final now = DateTime.now().toIso8601String();
 
-    database.db.execute(
+    await database.execute(
       'UPDATE goals SET deleted_at=?, version=?, updated_at=? WHERE id=? AND user_id=?',
       [now, newVersion, now, id, userId],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'goal',
       entityId: id,
@@ -666,13 +673,13 @@ class Api {
       'created_at': now,
     };
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at) '
       'VALUES(?,?,?,?,?,1,?,NULL)',
       [id, userId, action, payload['note'], now, now],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'decision',
       entityId: id,
@@ -685,7 +692,7 @@ class Api {
   }
 
   Future<Response> _reviews(Request request, String userId, [String? ignored]) async {
-    final rows = database.db.select(
+    final rows = await database.query(
       'SELECT id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at '
       'FROM reviews WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at DESC',
       [userId],
@@ -723,7 +730,7 @@ class Api {
       'createdAt': b['createdAt'] ?? now,
     };
 
-    database.db.execute(
+    await database.execute(
       'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at) '
       'VALUES(?,?,?,?,?,?,?,?,?,?,1,?,NULL)',
       [
@@ -741,7 +748,7 @@ class Api {
       ],
     );
 
-    syncService.recordChange(
+    await syncService.recordChangeAsync(
       userId: userId,
       entityType: 'review',
       entityId: id,
@@ -763,7 +770,7 @@ class Api {
     final operationsRaw = b['operations'] as List? ?? [];
     final operations = operationsRaw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
 
-    final result = syncService.processPush(
+    final result = await syncService.processPushAsync(
       userId: userId,
       deviceId: deviceId,
       operations: operations,
@@ -778,7 +785,7 @@ class Api {
     final limitParam = request.url.queryParameters['limit'];
     final limit = int.tryParse(limitParam ?? '200') ?? 200;
 
-    final result = syncService.pullChanges(
+    final result = await syncService.pullChangesAsync(
       userId: userId,
       cursor: cursor,
       limit: limit,
@@ -788,12 +795,12 @@ class Api {
   }
 
   Future<Response> _syncStatus(Request request, String userId, [String? ignored]) async {
-    final status = syncService.getStatus(userId);
+    final status = await syncService.getStatusAsync(userId);
     return _json(status);
   }
 
   Future<Response> _syncConflicts(Request request, String userId, [String? ignored]) async {
-    final conflicts = syncService.getConflicts(userId);
+    final conflicts = await syncService.getConflictsAsync(userId);
     return _json({'conflicts': conflicts});
   }
 
@@ -802,7 +809,7 @@ class Api {
     final strategy = (b['strategy'] ?? 'client_wins').toString();
     final merged = b['merged_payload'] != null ? Map<String, dynamic>.from(b['merged_payload'] as Map) : null;
 
-    final result = syncService.resolveConflict(
+    final result = await syncService.resolveConflictAsync(
       userId: userId,
       conflictId: conflictId,
       strategy: strategy,

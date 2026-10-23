@@ -21,12 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=build /app/bin/server /app/bin/server
 
-# Carpeta para base de datos persistente (montar volumen aquí)
+# Carpeta de fallback para datos temporales (no para finanzas de producción)
 RUN mkdir -p /app/data && chown -R 1000:1000 /app
 
 ENV PORT=8080
-ENV DATABASE_PATH=/app/data/plata.db
-ENV ALLOWED_ORIGIN=*
+ENV ENVIRONMENT=production
+ENV SEED_DEMO_USER=false
 
 EXPOSE 8080
 USER 1000
