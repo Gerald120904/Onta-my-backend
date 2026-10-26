@@ -366,7 +366,15 @@ class SqliteAppDatabase extends AppDatabase {
 
     try {
       _sqliteDb.execute('''
-        INSERT INTO accounts (id, user_id, name, currency, initial_balance, opening_balance, is_default, is_archived, created_at, version)
+        CREATE TRIGGER IF NOT EXISTS trg_account_currency_immutable_sqlite
+        BEFORE UPDATE OF currency ON accounts
+        FOR EACH ROW
+        WHEN NEW.currency IS NOT OLD.currency
+        BEGIN
+          SELECT RAISE(ABORT, 'Currency is immutable and cannot be changed for an existing account');
+        END;
+
+        INSERT INTO accounts (id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, created_at, version)
         SELECT 
           'acc_default_' || id,
           id,
@@ -374,6 +382,8 @@ class SqliteAppDatabase extends AppDatabase {
           'CRC',
           opening_balance,
           opening_balance,
+          '#10B981',
+          'wallet',
           1,
           0,
           created_at,
@@ -381,11 +391,17 @@ class SqliteAppDatabase extends AppDatabase {
         FROM users
         WHERE id NOT IN (SELECT user_id FROM accounts);
 
+        UPDATE accounts SET initial_balance = opening_balance WHERE (initial_balance IS NULL OR initial_balance = 0) AND opening_balance != 0;
+        UPDATE accounts SET opening_balance = initial_balance WHERE (opening_balance IS NULL OR opening_balance = 0) AND initial_balance != 0;
+
         UPDATE transactions SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL;
         UPDATE commitments SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL;
         UPDATE goals SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL;
         UPDATE decisions SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL;
         UPDATE reviews SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL;
+
+        INSERT OR IGNORE INTO schema_migrations (version, name, applied_at)
+        VALUES (4, '004_multi_currency_accounts', datetime('now'));
       ''');
     } catch (_) {}
 
@@ -687,6 +703,27 @@ class PostgresAppDatabase extends AppDatabase {
         await app.execute(stmt);
       } catch (_) {}
     }
+
+    try {
+      await app.execute('''
+        CREATE OR REPLACE FUNCTION check_account_currency_immutable()
+        RETURNS TRIGGER AS \$\$
+        BEGIN
+          IF NEW.currency IS DISTINCT FROM OLD.currency THEN
+            RAISE EXCEPTION 'Currency is immutable and cannot be changed for an existing account';
+          END IF;
+          RETURN NEW;
+        END;
+        \$\$ LANGUAGE plpgsql
+      ''');
+      await app.execute('DROP TRIGGER IF EXISTS trg_account_currency_immutable ON accounts');
+      await app.execute('''
+        CREATE TRIGGER trg_account_currency_immutable
+        BEFORE UPDATE ON accounts
+        FOR EACH ROW
+        EXECUTE FUNCTION check_account_currency_immutable()
+      ''');
+    } catch (_) {}
 
     return app;
   }

@@ -10,13 +10,29 @@ abstract class MigrationExecutor {
 class Migration {
   final int version;
   final String name;
-  final String Function(bool isPostgres) getSql;
+  final List<String> Function(bool isPostgres) getStatements;
 
-  const Migration({
+  Migration({
     required this.version,
     required this.name,
-    required this.getSql,
+    required String Function(bool isPostgres) getSql,
+  }) : getStatements = ((isPostgres) {
+          final sql = getSql(isPostgres);
+          return sql
+              .split(';')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty && !s.startsWith('--'))
+              .toList();
+        });
+
+  Migration.statements({
+    required this.version,
+    required this.name,
+    required this.getStatements,
   });
+
+  String Function(bool isPostgres) get getSql =>
+      (isPostgres) => getStatements(isPostgres).join(';\n');
 }
 
 class MigrationRunner {
@@ -188,70 +204,117 @@ class MigrationRunner {
         CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
       ''',
     ),
-    Migration(
+    Migration.statements(
       version: 4,
       name: '004_multi_currency_accounts',
-      getSql: (isPostgres) {
+      getStatements: (isPostgres) {
         final addColModifier = isPostgres ? 'IF NOT EXISTS' : '';
-        return '''
+        final stmts = <String>[
+          // 1. Crear tabla accounts con TODAS las columnas esperadas
+          '''
           CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
             name TEXT NOT NULL,
             currency TEXT NOT NULL,
+            initial_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
             opening_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+            color TEXT,
+            icon TEXT,
             is_default INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT,
             deleted_at TEXT,
             version INTEGER NOT NULL DEFAULT 1
-          );
+          )
+          ''',
+          'CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id)',
 
-          CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+          // 2. Columnas adicionales para asegurar compatibilidad si la tabla fue creada previamente
+          'ALTER TABLE accounts ADD COLUMN $addColModifier initial_balance NUMERIC(18,2) NOT NULL DEFAULT 0',
+          'ALTER TABLE accounts ADD COLUMN $addColModifier opening_balance NUMERIC(18,2) NOT NULL DEFAULT 0',
+          'ALTER TABLE accounts ADD COLUMN $addColModifier color TEXT',
+          'ALTER TABLE accounts ADD COLUMN $addColModifier icon TEXT',
+          'ALTER TABLE accounts ADD COLUMN $addColModifier is_archived INTEGER NOT NULL DEFAULT 0',
 
-          ALTER TABLE transactions ADD COLUMN $addColModifier account_id TEXT;
-          ALTER TABLE commitments ADD COLUMN $addColModifier account_id TEXT;
-          ALTER TABLE goals ADD COLUMN $addColModifier account_id TEXT;
-          ALTER TABLE decisions ADD COLUMN $addColModifier account_id TEXT;
-          ALTER TABLE reviews ADD COLUMN $addColModifier account_id TEXT;
+          // 3. Vincular account_id en tablas de negocio
+          'ALTER TABLE transactions ADD COLUMN $addColModifier account_id TEXT',
+          'ALTER TABLE commitments ADD COLUMN $addColModifier account_id TEXT',
+          'ALTER TABLE goals ADD COLUMN $addColModifier account_id TEXT',
+          'ALTER TABLE decisions ADD COLUMN $addColModifier account_id TEXT',
+          'ALTER TABLE reviews ADD COLUMN $addColModifier account_id TEXT',
 
-          CREATE INDEX IF NOT EXISTS idx_transactions_user_account ON transactions(user_id, account_id);
-          CREATE INDEX IF NOT EXISTS idx_commitments_user_account ON commitments(user_id, account_id);
-          CREATE INDEX IF NOT EXISTS idx_goals_user_account ON goals(user_id, account_id);
+          // 4. Índices para consultas compuestas por usuario y cuenta
+          'CREATE INDEX IF NOT EXISTS idx_transactions_user_account ON transactions(user_id, account_id)',
+          'CREATE INDEX IF NOT EXISTS idx_commitments_user_account ON commitments(user_id, account_id)',
+          'CREATE INDEX IF NOT EXISTS idx_goals_user_account ON goals(user_id, account_id)',
+        ];
 
-          INSERT INTO accounts (id, user_id, name, currency, opening_balance, is_default, created_at, version)
+        // 5. Inmutabilidad estricta de divisa a nivel de base de datos
+        if (isPostgres) {
+          stmts.addAll([
+            '''
+            CREATE OR REPLACE FUNCTION check_account_currency_immutable()
+            RETURNS TRIGGER AS \$\$
+            BEGIN
+              IF NEW.currency IS DISTINCT FROM OLD.currency THEN
+                RAISE EXCEPTION 'Currency is immutable and cannot be changed for an existing account';
+              END IF;
+              RETURN NEW;
+            END;
+            \$\$ LANGUAGE plpgsql
+            ''',
+            'DROP TRIGGER IF EXISTS trg_account_currency_immutable ON accounts',
+            '''
+            CREATE TRIGGER trg_account_currency_immutable
+            BEFORE UPDATE ON accounts
+            FOR EACH ROW
+            EXECUTE FUNCTION check_account_currency_immutable()
+            ''',
+          ]);
+        } else {
+          stmts.add('''
+            CREATE TRIGGER IF NOT EXISTS trg_account_currency_immutable_sqlite
+            BEFORE UPDATE OF currency ON accounts
+            FOR EACH ROW
+            WHEN NEW.currency IS NOT OLD.currency
+            BEGIN
+              SELECT RAISE(ABORT, 'Currency is immutable and cannot be changed for an existing account');
+            END
+          ''');
+        }
+
+        // 6. Backfill seguro de usuarios y movimientos existentes sin pérdida de datos
+        stmts.addAll([
+          '''
+          INSERT INTO accounts (id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, created_at, version)
           SELECT 
             'acc_default_' || id,
             id,
             'Cuenta Principal',
             'CRC',
             opening_balance,
+            opening_balance,
+            '#10B981',
+            'wallet',
             1,
+            0,
             created_at,
             1
           FROM users
-          WHERE id NOT IN (SELECT user_id FROM accounts);
+          WHERE id NOT IN (SELECT user_id FROM accounts)
+          ''',
+          "UPDATE accounts SET initial_balance = opening_balance WHERE (initial_balance IS NULL OR initial_balance = 0) AND opening_balance != 0",
+          "UPDATE accounts SET opening_balance = initial_balance WHERE (opening_balance IS NULL OR opening_balance = 0) AND initial_balance != 0",
+          "UPDATE transactions SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL",
+          "UPDATE commitments SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL",
+          "UPDATE goals SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL",
+          "UPDATE decisions SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL",
+          "UPDATE reviews SET account_id = 'acc_default_' || user_id WHERE account_id IS NULL",
+        ]);
 
-          UPDATE transactions 
-          SET account_id = 'acc_default_' || user_id
-          WHERE account_id IS NULL;
-
-          UPDATE commitments 
-          SET account_id = 'acc_default_' || user_id
-          WHERE account_id IS NULL;
-
-          UPDATE goals 
-          SET account_id = 'acc_default_' || user_id
-          WHERE account_id IS NULL;
-
-          UPDATE decisions 
-          SET account_id = 'acc_default_' || user_id
-          WHERE account_id IS NULL;
-
-          UPDATE reviews 
-          SET account_id = 'acc_default_' || user_id
-          WHERE account_id IS NULL;
-        ''';
+        return stmts;
       },
     ),
   ];
@@ -274,15 +337,11 @@ class MigrationRunner {
     for (final m in migrations) {
       if (!appliedVersions.contains(m.version)) {
         await executor.transaction((tx) async {
-          final sql = m.getSql(executor.isPostgres);
-          // Execute statements separated by semicolons
-          final statements = sql
-              .split(';')
-              .map((s) => s.trim())
-              .where((s) => s.isNotEmpty && !s.startsWith('--'))
-              .toList();
+          final statements = m.getStatements(executor.isPostgres);
 
-          for (final stmt in statements) {
+          for (final rawStmt in statements) {
+            final stmt = rawStmt.trim();
+            if (stmt.isEmpty || stmt.startsWith('--')) continue;
             try {
               await tx.execute(stmt);
             } catch (e) {

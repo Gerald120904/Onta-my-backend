@@ -427,9 +427,9 @@ class Api {
     final initBalance = userRows.isNotEmpty ? _amount(userRows.first['opening_balance']) : 0.0;
 
     await executor.execute(
-      'INSERT INTO accounts(id, user_id, name, currency, initial_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
-      'VALUES(?,?,?,?,?,?,?,1,0,1,?,?,NULL)',
-      [accountId, userId, 'Efectivo Costa Rica', 'CRC', initBalance, '#10B981', 'wallet', now, now],
+      'INSERT INTO accounts(id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
+      'VALUES(?,?,?,?,?,?,?,?,1,0,1,?,?,NULL)',
+      [accountId, userId, 'Efectivo Costa Rica', 'CRC', initBalance, initBalance, '#10B981', 'wallet', now, now],
     );
     return accountId;
   }
@@ -534,9 +534,9 @@ class Api {
       };
 
       await tx.execute(
-        'INSERT INTO accounts(id, user_id, name, currency, initial_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
-        'VALUES(?,?,?,?,?,?,?,?,0,1,?,?,NULL)',
-        [id, userId, name, rawCurrency, initialBalance, color, icon, isDefault, now, now],
+        'INSERT INTO accounts(id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
+        'VALUES(?,?,?,?,?,?,?,?,?,0,1,?,?,NULL)',
+        [id, userId, name, rawCurrency, initialBalance, initialBalance, color, icon, isDefault, now, now],
       );
 
       await syncService.recordChangeAsync(
