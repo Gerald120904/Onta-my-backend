@@ -74,8 +74,8 @@ void main() {
         // 4. Verificar migraciones aplicadas
         final migs = await pgDb.query('SELECT version, name FROM schema_migrations ORDER BY version ASC');
         final versions = migs.map((m) => (m['version'] as num).toInt()).toList();
-        expect(versions, containsAll([1, 2, 3]), reason: 'Deben estar aplicadas las migraciones 001, 002 y 003 en Neon');
-        print('✔ Migraciones 001, 002 y 003 verificadas en Neon: $versions');
+        expect(versions, containsAll([1, 2, 3, 4]), reason: 'Deben estar aplicadas las migraciones 001, 002, 003 y 004 en Neon');
+        print('✔ Migraciones 001, 002, 003 y 004 verificadas en Neon: $versions');
 
         // 5. Verificar que todas las tablas del esquema existan
         final tables = await pgDb.query('''
@@ -86,6 +86,7 @@ void main() {
         final expectedTables = [
           'users',
           'sessions',
+          'accounts',
           'transactions',
           'commitments',
           'goals',
@@ -100,14 +101,58 @@ void main() {
         for (final t in expectedTables) {
           expect(tableNames.contains(t), isTrue, reason: 'Tabla $t debe existir en Neon');
         }
-        print('✔ Las 12 tablas del Backend existen en Neon.');
+        print('✔ Las 13 tablas del Backend (incluyendo accounts) existen en Neon.');
+
+        // 5.1 Verificar columnas esperadas en tabla accounts
+        final accCols = await pgDb.query('''
+          SELECT column_name, data_type, is_nullable
+          FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'accounts'
+        ''');
+        final accColNames = accCols.map((c) => c['column_name'] as String).toSet();
+        final expectedAccCols = [
+          'id', 'user_id', 'name', 'currency', 'initial_balance', 'opening_balance',
+          'color', 'icon', 'is_default', 'is_archived', 'created_at', 'updated_at', 'deleted_at', 'version'
+        ];
+        for (final ac in expectedAccCols) {
+          expect(accColNames.contains(ac), isTrue, reason: 'Columna accounts.$ac debe existir en Neon');
+        }
+        print('✔ Todas las 14 columnas de accounts existen en Neon.');
+
+        // 5.2 Verificar columnas account_id en tablas de negocio
+        for (final tbl in ['transactions', 'commitments', 'goals', 'decisions', 'reviews']) {
+          final relCols = await pgDb.query('''
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ? AND column_name = 'account_id'
+          ''', [tbl]);
+          expect(relCols.isNotEmpty, isTrue, reason: 'Columna $tbl.account_id debe existir en Neon');
+        }
+        print('✔ Columna account_id verificada en todas las tablas de negocio.');
+
+        // 5.3 Probar disparador de inmutabilidad de divisa en PostgreSQL
+        final testImmutAccId = 'neon_immut_${DateTime.now().millisecondsSinceEpoch}';
+        await pgDb.execute('''
+          INSERT INTO accounts (id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, created_at, version)
+          VALUES (?, 'system_test', 'Cuenta Test Inmutabilidad', 'CRC', 0, 0, '#10B981', 'wallet', 0, 0, ?, 1)
+        ''', [testImmutAccId, DateTime.now().toIso8601String()]);
+
+        bool currencyBlocked = false;
+        try {
+          await pgDb.execute('UPDATE accounts SET currency = ? WHERE id = ?', ['USD', testImmutAccId]);
+        } catch (e) {
+          currencyBlocked = true;
+          print('✔ UPDATE accounts.currency bloqueado exitosamente por trigger en Neon: $e');
+        } finally {
+          await pgDb.execute('DELETE FROM accounts WHERE id = ?', [testImmutAccId]);
+        }
+        expect(currencyBlocked, isTrue, reason: 'Trigger debe impedir modificar currency en Neon');
 
         // 6. Verificar tipos exactos NUMERIC(18,2) en Neon
         final cols = await pgDb.query('''
           SELECT table_name, column_name, data_type, numeric_precision, numeric_scale
           FROM information_schema.columns
           WHERE table_schema = 'public'
-            AND column_name IN ('opening_balance', 'amount', 'target_amount', 'saved_amount')
+            AND column_name IN ('opening_balance', 'initial_balance', 'amount', 'target_amount', 'saved_amount')
           ORDER BY table_name, column_name
         ''');
         expect(cols.isNotEmpty, isTrue);
