@@ -1075,6 +1075,9 @@ class SyncService {
 
   String? _tableNameFor(String entityType) {
     switch (entityType) {
+      case 'account':
+      case 'accounts':
+        return 'accounts';
       case 'transaction':
       case 'transactions':
         return 'transactions';
@@ -1108,10 +1111,32 @@ class SyncService {
     required String now,
   }) {
     switch (table) {
+      case 'accounts':
+        final initialBal = _asDouble(payload['initial_balance'] ?? payload['initialBalance'] ?? payload['opening_balance'] ?? payload['openingBalance']);
+        database.db.execute(
+          'INSERT INTO accounts(id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
+          [
+            id,
+            userId,
+            payload['name'] ?? 'Cuenta',
+            (payload['currency'] ?? 'CRC').toString().toUpperCase(),
+            initialBal,
+            initialBal,
+            payload['color'] ?? '#2563EB',
+            payload['icon'] ?? 'wallet',
+            (payload['is_default'] ?? payload['isDefault'] ?? false) == true ? 1 : 0,
+            (payload['is_archived'] ?? payload['isArchived'] ?? false) == true ? 1 : 0,
+            version,
+            payload['created_at'] ?? now,
+            now,
+          ],
+        );
+        break;
       case 'transactions':
         database.db.execute(
-          'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1123,13 +1148,14 @@ class SyncService {
             (payload['recognized'] ?? true) == true ? 1 : 0,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'commitments':
         database.db.execute(
-          'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1139,13 +1165,14 @@ class SyncService {
             payload['status'] ?? 'pending',
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'goals':
         database.db.execute(
-          'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1154,13 +1181,14 @@ class SyncService {
             _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'decisions':
         database.db.execute(
-          'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1169,13 +1197,14 @@ class SyncService {
             payload['created_at'] ?? now,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'reviews':
         database.db.execute(
-          'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1189,6 +1218,7 @@ class SyncService {
             payload['createdAt'] ?? now,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
@@ -1205,10 +1235,32 @@ class SyncService {
     required String now,
   }) async {
     switch (table) {
+      case 'accounts':
+        final initialBal = _asDouble(payload['initial_balance'] ?? payload['initialBalance'] ?? payload['opening_balance'] ?? payload['openingBalance']);
+        await tx.execute(
+          'INSERT INTO accounts(id, user_id, name, currency, initial_balance, opening_balance, color, icon, is_default, is_archived, version, created_at, updated_at, deleted_at) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
+          [
+            id,
+            userId,
+            payload['name'] ?? 'Cuenta',
+            (payload['currency'] ?? 'CRC').toString().toUpperCase(),
+            initialBal,
+            initialBal,
+            payload['color'] ?? '#2563EB',
+            payload['icon'] ?? 'wallet',
+            (payload['is_default'] ?? payload['isDefault'] ?? false) == true ? 1 : 0,
+            (payload['is_archived'] ?? payload['isArchived'] ?? false) == true ? 1 : 0,
+            version,
+            payload['created_at'] ?? now,
+            now,
+          ],
+        );
+        break;
       case 'transactions':
         await tx.execute(
-          'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO transactions(id, user_id, type, category, amount, description, date, recognized, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1220,13 +1272,14 @@ class SyncService {
             (payload['recognized'] ?? true) == true ? 1 : 0,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'commitments':
         await tx.execute(
-          'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO commitments(id, user_id, title, amount, due_date, status, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1236,13 +1289,14 @@ class SyncService {
             payload['status'] ?? 'pending',
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'goals':
         await tx.execute(
-          'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO goals(id, user_id, title, target_amount, saved_amount, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1251,13 +1305,14 @@ class SyncService {
             _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'decisions':
         await tx.execute(
-          'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO decisions(id, user_id, action, note, created_at, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1266,13 +1321,14 @@ class SyncService {
             payload['created_at'] ?? now,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
       case 'reviews':
         await tx.execute(
-          'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at) '
-          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
+          'INSERT INTO reviews(id, user_id, start_date, end_date, period_title, period_subtitle, transaction_ids, decision, decision_details, created_at, version, updated_at, deleted_at, account_id) '
+          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)',
           [
             id,
             userId,
@@ -1286,6 +1342,7 @@ class SyncService {
             payload['createdAt'] ?? now,
             version,
             now,
+            payload['account_id'] ?? payload['accountId'] ?? 'acc_default_$userId',
           ],
         );
         break;
@@ -1301,86 +1358,194 @@ class SyncService {
     required String now,
   }) {
     switch (table) {
-      case 'transactions':
+      case 'accounts':
         database.db.execute(
-          'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
+          'UPDATE accounts SET name=?, color=?, icon=?, is_default=?, is_archived=?, version=?, updated_at=? WHERE id=? AND user_id=?',
           [
-            payload['type'] ?? 'expense',
-            payload['category'] ?? 'Otros',
-            _asDouble(payload['amount']),
-            payload['description'] ?? '',
-            payload['date'] ?? now,
-            (payload['recognized'] ?? true) == true ? 1 : 0,
+            payload['name'] ?? 'Cuenta',
+            payload['color'] ?? '#2563EB',
+            payload['icon'] ?? 'wallet',
+            (payload['is_default'] ?? payload['isDefault'] ?? false) == true ? 1 : 0,
+            (payload['is_archived'] ?? payload['isArchived'] ?? false) == true ? 1 : 0,
             version,
             now,
             id,
             userId,
           ],
         );
+        break;
+      case 'transactions':
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          database.db.execute(
+            'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=?, account_id=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['type'] ?? 'expense',
+              payload['category'] ?? 'Otros',
+              _asDouble(payload['amount']),
+              payload['description'] ?? '',
+              payload['date'] ?? now,
+              (payload['recognized'] ?? true) == true ? 1 : 0,
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          database.db.execute(
+            'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['type'] ?? 'expense',
+              payload['category'] ?? 'Otros',
+              _asDouble(payload['amount']),
+              payload['description'] ?? '',
+              payload['date'] ?? now,
+              (payload['recognized'] ?? true) == true ? 1 : 0,
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'commitments':
-        database.db.execute(
-          'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['title'] ?? 'Compromiso',
-            _asDouble(payload['amount']),
-            payload['dueDate'] ?? payload['due_date'] ?? now,
-            payload['status'] ?? 'pending',
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          database.db.execute(
+            'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Compromiso',
+              _asDouble(payload['amount']),
+              payload['dueDate'] ?? payload['due_date'] ?? now,
+              payload['status'] ?? 'pending',
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          database.db.execute(
+            'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Compromiso',
+              _asDouble(payload['amount']),
+              payload['dueDate'] ?? payload['due_date'] ?? now,
+              payload['status'] ?? 'pending',
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'goals':
-        database.db.execute(
-          'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['title'] ?? 'Meta',
-            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
-            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          database.db.execute(
+            'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Meta',
+              _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+              _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          database.db.execute(
+            'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Meta',
+              _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+              _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'decisions':
-        database.db.execute(
-          'UPDATE decisions SET action=?, note=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-          [
-            payload['action'] ?? '',
-            payload['note'] ?? '',
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          database.db.execute(
+            'UPDATE decisions SET action=?, note=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['action'] ?? '',
+              payload['note'] ?? '',
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          database.db.execute(
+            'UPDATE decisions SET action=?, note=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['action'] ?? '',
+              payload['note'] ?? '',
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'reviews':
-        database.db.execute(
-          'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['start'] ?? now,
-            payload['end'] ?? now,
-            payload['periodTitle'] ?? '',
-            payload['periodSubtitle'] ?? '',
-            jsonEncode(payload['transactionIds'] ?? []),
-            payload['decision'] ?? '',
-            jsonEncode(payload['decisionDetails'] ?? {}),
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          database.db.execute(
+            'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=?, account_id=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['start'] ?? now,
+              payload['end'] ?? now,
+              payload['periodTitle'] ?? '',
+              payload['periodSubtitle'] ?? '',
+              jsonEncode(payload['transactionIds'] ?? []),
+              payload['decision'] ?? '',
+              jsonEncode(payload['decisionDetails'] ?? {}),
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          database.db.execute(
+            'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['start'] ?? now,
+              payload['end'] ?? now,
+              payload['periodTitle'] ?? '',
+              payload['periodSubtitle'] ?? '',
+              jsonEncode(payload['transactionIds'] ?? []),
+              payload['decision'] ?? '',
+              jsonEncode(payload['decisionDetails'] ?? {}),
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'users':
         database.db.execute(
@@ -1406,86 +1571,194 @@ class SyncService {
     required String now,
   }) async {
     switch (table) {
-      case 'transactions':
+      case 'accounts':
         await tx.execute(
-          'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
+          'UPDATE accounts SET name=?, color=?, icon=?, is_default=?, is_archived=?, version=?, updated_at=? WHERE id=? AND user_id=?',
           [
-            payload['type'] ?? 'expense',
-            payload['category'] ?? 'Otros',
-            _asDouble(payload['amount']),
-            payload['description'] ?? '',
-            payload['date'] ?? now,
-            (payload['recognized'] ?? true) == true ? 1 : 0,
+            payload['name'] ?? 'Cuenta',
+            payload['color'] ?? '#2563EB',
+            payload['icon'] ?? 'wallet',
+            (payload['is_default'] ?? payload['isDefault'] ?? false) == true ? 1 : 0,
+            (payload['is_archived'] ?? payload['isArchived'] ?? false) == true ? 1 : 0,
             version,
             now,
             id,
             userId,
           ],
         );
+        break;
+      case 'transactions':
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          await tx.execute(
+            'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=?, account_id=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['type'] ?? 'expense',
+              payload['category'] ?? 'Otros',
+              _asDouble(payload['amount']),
+              payload['description'] ?? '',
+              payload['date'] ?? now,
+              (payload['recognized'] ?? true) == true ? 1 : 0,
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          await tx.execute(
+            'UPDATE transactions SET type=?, category=?, amount=?, description=?, date=?, recognized=?, version=?, updated_at=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['type'] ?? 'expense',
+              payload['category'] ?? 'Otros',
+              _asDouble(payload['amount']),
+              payload['description'] ?? '',
+              payload['date'] ?? now,
+              (payload['recognized'] ?? true) == true ? 1 : 0,
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'commitments':
-        await tx.execute(
-          'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['title'] ?? 'Compromiso',
-            _asDouble(payload['amount']),
-            payload['dueDate'] ?? payload['due_date'] ?? now,
-            payload['status'] ?? 'pending',
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          await tx.execute(
+            'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Compromiso',
+              _asDouble(payload['amount']),
+              payload['dueDate'] ?? payload['due_date'] ?? now,
+              payload['status'] ?? 'pending',
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          await tx.execute(
+            'UPDATE commitments SET title=?, amount=?, due_date=?, status=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Compromiso',
+              _asDouble(payload['amount']),
+              payload['dueDate'] ?? payload['due_date'] ?? now,
+              payload['status'] ?? 'pending',
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'goals':
-        await tx.execute(
-          'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['title'] ?? 'Meta',
-            _asDouble(payload['targetAmount'] ?? payload['target_amount']),
-            _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          await tx.execute(
+            'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Meta',
+              _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+              _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          await tx.execute(
+            'UPDATE goals SET title=?, target_amount=?, saved_amount=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['title'] ?? 'Meta',
+              _asDouble(payload['targetAmount'] ?? payload['target_amount']),
+              _asDouble(payload['savedAmount'] ?? payload['saved_amount']),
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'decisions':
-        await tx.execute(
-          'UPDATE decisions SET action=?, note=?, version=?, updated_at=? WHERE id=? AND user_id=?',
-          [
-            payload['action'] ?? '',
-            payload['note'] ?? '',
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          await tx.execute(
+            'UPDATE decisions SET action=?, note=?, version=?, updated_at=?, account_id=? WHERE id=? AND user_id=?',
+            [
+              payload['action'] ?? '',
+              payload['note'] ?? '',
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          await tx.execute(
+            'UPDATE decisions SET action=?, note=?, version=?, updated_at=? WHERE id=? AND user_id=?',
+            [
+              payload['action'] ?? '',
+              payload['note'] ?? '',
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'reviews':
-        await tx.execute(
-          'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=? '
-          'WHERE id=? AND user_id=?',
-          [
-            payload['start'] ?? now,
-            payload['end'] ?? now,
-            payload['periodTitle'] ?? '',
-            payload['periodSubtitle'] ?? '',
-            jsonEncode(payload['transactionIds'] ?? []),
-            payload['decision'] ?? '',
-            jsonEncode(payload['decisionDetails'] ?? {}),
-            version,
-            now,
-            id,
-            userId,
-          ],
-        );
+        final accId = payload['account_id'] ?? payload['accountId'];
+        if (accId != null) {
+          await tx.execute(
+            'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=?, account_id=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['start'] ?? now,
+              payload['end'] ?? now,
+              payload['periodTitle'] ?? '',
+              payload['periodSubtitle'] ?? '',
+              jsonEncode(payload['transactionIds'] ?? []),
+              payload['decision'] ?? '',
+              jsonEncode(payload['decisionDetails'] ?? {}),
+              version,
+              now,
+              accId,
+              id,
+              userId,
+            ],
+          );
+        } else {
+          await tx.execute(
+            'UPDATE reviews SET start_date=?, end_date=?, period_title=?, period_subtitle=?, transaction_ids=?, decision=?, decision_details=?, version=?, updated_at=? '
+            'WHERE id=? AND user_id=?',
+            [
+              payload['start'] ?? now,
+              payload['end'] ?? now,
+              payload['periodTitle'] ?? '',
+              payload['periodSubtitle'] ?? '',
+              jsonEncode(payload['transactionIds'] ?? []),
+              payload['decision'] ?? '',
+              jsonEncode(payload['decisionDetails'] ?? {}),
+              version,
+              now,
+              id,
+              userId,
+            ],
+          );
+        }
         break;
       case 'users':
         await tx.execute(

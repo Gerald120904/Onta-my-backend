@@ -188,6 +188,72 @@ class MigrationRunner {
         CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
       ''',
     ),
+    Migration(
+      version: 4,
+      name: '004_multi_currency_accounts',
+      getSql: (isPostgres) {
+        final addColModifier = isPostgres ? 'IF NOT EXISTS' : '';
+        return '''
+          CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            opening_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            deleted_at TEXT,
+            version INTEGER NOT NULL DEFAULT 1
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+
+          ALTER TABLE transactions ADD COLUMN $addColModifier account_id TEXT;
+          ALTER TABLE commitments ADD COLUMN $addColModifier account_id TEXT;
+          ALTER TABLE goals ADD COLUMN $addColModifier account_id TEXT;
+          ALTER TABLE decisions ADD COLUMN $addColModifier account_id TEXT;
+          ALTER TABLE reviews ADD COLUMN $addColModifier account_id TEXT;
+
+          CREATE INDEX IF NOT EXISTS idx_transactions_user_account ON transactions(user_id, account_id);
+          CREATE INDEX IF NOT EXISTS idx_commitments_user_account ON commitments(user_id, account_id);
+          CREATE INDEX IF NOT EXISTS idx_goals_user_account ON goals(user_id, account_id);
+
+          INSERT INTO accounts (id, user_id, name, currency, opening_balance, is_default, created_at, version)
+          SELECT 
+            'acc_default_' || id,
+            id,
+            'Cuenta Principal',
+            'CRC',
+            opening_balance,
+            1,
+            created_at,
+            1
+          FROM users
+          WHERE id NOT IN (SELECT user_id FROM accounts);
+
+          UPDATE transactions 
+          SET account_id = 'acc_default_' || user_id
+          WHERE account_id IS NULL;
+
+          UPDATE commitments 
+          SET account_id = 'acc_default_' || user_id
+          WHERE account_id IS NULL;
+
+          UPDATE goals 
+          SET account_id = 'acc_default_' || user_id
+          WHERE account_id IS NULL;
+
+          UPDATE decisions 
+          SET account_id = 'acc_default_' || user_id
+          WHERE account_id IS NULL;
+
+          UPDATE reviews 
+          SET account_id = 'acc_default_' || user_id
+          WHERE account_id IS NULL;
+        ''';
+      },
+    ),
   ];
 
   Future<void> runMigrations() async {
@@ -217,7 +283,16 @@ class MigrationRunner {
               .toList();
 
           for (final stmt in statements) {
-            await tx.execute(stmt);
+            try {
+              await tx.execute(stmt);
+            } catch (e) {
+              final errStr = e.toString().toLowerCase();
+              if (stmt.toUpperCase().contains('ADD COLUMN') && errStr.contains('duplicate column')) {
+                // Columna ya existe en SQLite
+                continue;
+              }
+              rethrow;
+            }
           }
 
           final now = DateTime.now().toIso8601String();
