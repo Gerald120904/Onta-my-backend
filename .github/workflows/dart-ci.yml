@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, feature/offline-first]
   pull_request:
-    branches: [main]
+    branches: [main, feature/offline-first]
   workflow_dispatch:
 
 permissions:
@@ -29,5 +29,5 @@ jobs:
         run: dart pub get
       - name: Analisis Dart
         run: dart analyze
-      - name: Pruebas unitarias sin bases remotas
-        run: dart test test/backend_test.dart test/multi_currency_accounts_test.dart test/postgres_adapter_test.dart
+      - name: Pruebas unitarias, SQLite, multidivisa y seguridad
+        run: dart test
