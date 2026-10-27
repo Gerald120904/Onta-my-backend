@@ -212,6 +212,6 @@ void main() {
         }
         await pgDb?.close();
       }
-    });
+    }, skip: (neonUrl != null && neonUrl.trim().isNotEmpty && AppDatabase.isValidPostgresUrl(neonUrl)) ? null : 'Falta configurar NEON_DATABASE_URL (requiere conexión autorizada)');
   });
 }

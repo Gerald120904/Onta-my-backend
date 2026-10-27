@@ -44,6 +44,25 @@ void main() {
       test('1.3 En desarrollo (isProduction: false), sslmode=disable es permitido para pruebas locales', () async {
         const localTestUrl = 'postgresql://postgres@127.0.0.1:5433/onta_test?sslmode=disable';
 
+        bool isAvailable = false;
+        try {
+          final s = await Socket.connect('127.0.0.1', 5433, timeout: const Duration(milliseconds: 300));
+          s.destroy();
+          isAvailable = true;
+        } catch (_) {
+          isAvailable = false;
+        }
+
+        if (!isAvailable) {
+          expect(AppDatabase.isValidPostgresUrl(localTestUrl), isTrue);
+          expect(
+            () async => await PostgresAppDatabase.connect(localTestUrl, isProduction: true),
+            throwsA(isA<StateError>()),
+            reason: 'En producción debe seguir rechazándose sslmode=disable',
+          );
+          return;
+        }
+
         final db = await PostgresAppDatabase.connect(localTestUrl, isProduction: false);
         try {
           expect(db.isPostgres, isTrue);

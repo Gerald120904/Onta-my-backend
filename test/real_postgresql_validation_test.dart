@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
@@ -6,8 +7,17 @@ import '../lib/src/api.dart';
 import '../lib/src/database.dart';
 import '../lib/src/migrations/migration_runner.dart';
 
-void main() {
+void main() async {
   const pgUrl = 'postgresql://postgres@127.0.0.1:5433/onta_test?sslmode=disable';
+
+  bool isAvailable = false;
+  try {
+    final s = await Socket.connect('127.0.0.1', 5433, timeout: const Duration(milliseconds: 300));
+    s.destroy();
+    isAvailable = true;
+  } catch (_) {
+    isAvailable = false;
+  }
 
   group('ONTA MY MONEY — VALIDACIÓN REAL DE POSTGRESQL', () {
     late PostgresAppDatabase pgDb;
@@ -763,5 +773,5 @@ void main() {
         }
       });
     });
-  });
+  }, skip: isAvailable ? null : 'PostgreSQL local no disponible en puerto 5433 (se ejecuta cuando esté disponible)');
 }
