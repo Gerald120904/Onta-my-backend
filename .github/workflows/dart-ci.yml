@@ -1,0 +1,33 @@
+name: ONTA MY MONEY - Verificacion Backend Dart
+
+on:
+  push:
+    branches: [main, feature/offline-first]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: onta-backend-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v4
+      - name: Configurar Dart estable
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Dependencias
+        run: dart pub get
+      - name: Analisis Dart
+        run: dart analyze
+      - name: Pruebas unitarias sin bases remotas
+        run: dart test test/backend_test.dart test/multi_currency_accounts_test.dart test/postgres_adapter_test.dart
