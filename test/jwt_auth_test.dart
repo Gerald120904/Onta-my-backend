@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
+import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 
 import '../lib/src/api.dart';
 import '../lib/src/auth_tokens.dart';
@@ -87,11 +88,6 @@ void main() {
     final next =
         jsonDecode(await rotated.readAsString()) as Map<String, dynamic>;
     expect(
-        (await send('/api/auth/refresh',
-                body: {'refresh_token': first['refresh_token']}))
-            .statusCode,
-        401);
-    expect(
         (await send('/api/me', method: 'GET', token: first['token'] as String))
             .statusCode,
         401);
@@ -109,17 +105,51 @@ void main() {
         401);
   });
 
+  test('Replay de refresh revoca toda la familia de sesiÃ³n', () async {
+    final first = await login();
+    final rotated = await send('/api/auth/refresh',
+        body: {'refresh_token': first['refresh_token']});
+    final next = jsonDecode(await rotated.readAsString()) as Map<String, dynamic>;
+    expect(rotated.statusCode, 200);
+    expect(
+        (await send('/api/auth/refresh',
+                body: {'refresh_token': first['refresh_token']}))
+            .statusCode,
+        401);
+    expect(
+        (await send('/api/me', method: 'GET', token: next['token'] as String))
+            .statusCode,
+        401);
+  });
+
+  test('Dos refresh concurrentes revocan la familia al detectar replay',
+      () async {
+    final first = await login();
+    final responses = await Future.wait([
+      send('/api/auth/refresh',
+          body: {'refresh_token': first['refresh_token']}),
+      send('/api/auth/refresh',
+          body: {'refresh_token': first['refresh_token']}),
+    ]);
+    expect(responses.map((response) => response.statusCode).toList(),
+        containsAll([200, 401]));
+    final successful = responses.firstWhere((response) => response.statusCode == 200);
+    final next = jsonDecode(await successful.readAsString()) as Map<String, dynamic>;
+    expect(
+        (await send('/api/me', method: 'GET', token: next['token'] as String))
+            .statusCode,
+        401);
+  });
+
   test('Cinco credenciales erróneas bloquean temporalmente el acceso',
       () async {
-    for (var i = 0; i < 5; i++) {
-      expect(
-          (await send('/api/auth/login', body: {
-            'email': 'auth@test.example',
-            'password': 'wrong',
-          }))
-              .statusCode,
-          401);
-    }
+    final failures = await Future.wait(List.generate(
+        5,
+        (_) => send('/api/auth/login', body: {
+              'email': 'auth@test.example',
+              'password': 'wrong',
+            })));
+    expect(failures.map((response) => response.statusCode), everyElement(401));
     expect(
         (await send('/api/auth/login', body: {
           'email': 'auth@test.example',
@@ -183,13 +213,19 @@ void main() {
 
   test('Firma inválida y expiración JWT se rechazan', () {
     final tokens = AuthTokens('a' * 32);
-    final token =
-        tokens.issueAccessToken('user', now: DateTime.utc(2025, 1, 1));
-    expect(tokens.verifyAccessToken(token, now: DateTime.utc(2025, 1, 1, 0, 1)),
-        'user');
-    expect(
-        tokens.verifyAccessToken(token, now: DateTime.utc(2025, 1, 1, 0, 16)),
-        isNull);
+    final now = DateTime.now().toUtc();
+    final token = tokens.issueAccessToken('user', 'session-1', now: now);
+    expect(tokens.verifyAccessToken(token, now: now), 'user');
+    expect(tokens.verifyAccessToken(token, now: now.add(const Duration(minutes: 16))), isNull);
     expect(AuthTokens('b' * 32).verifyAccessToken(token), isNull);
+    expect(tokens.verifyAccessClaims(token)?.sessionId, 'session-1');
+
+    final alternativeAlgorithm = JWT({
+      'sid': 'session-1',
+      'nbf': now.millisecondsSinceEpoch ~/ 1000,
+      'exp': now.add(const Duration(minutes: 5)).millisecondsSinceEpoch ~/ 1000,
+    }, issuer: AuthTokens.issuer, audience: Audience.one(AuthTokens.audience), subject: 'user', jwtId: 'jti')
+        .sign(SecretKey('a' * 32), algorithm: JWTAlgorithm.HS512);
+    expect(tokens.verifyAccessToken(alternativeAlgorithm), isNull);
   });
 }

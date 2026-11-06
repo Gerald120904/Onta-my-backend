@@ -41,6 +41,11 @@ void main() {
               .length,
           1);
       expect(
+          (await db.query(
+                  'SELECT version FROM schema_migrations WHERE version=7'))
+              .length,
+          1);
+      expect(
           (await db.query('SELECT email_verified FROM users WHERE id=?',
                   ['legacy-user']))
               .single['email_verified'],
@@ -53,6 +58,11 @@ void main() {
       expect(
           (await db.query(
                   "SELECT name FROM sqlite_master WHERE name='gmail_oauth_tokens'"))
+              .length,
+          1);
+      expect(
+          (await db.query(
+                  "SELECT name FROM sqlite_master WHERE name='used_refresh_tokens'"))
               .length,
           1);
       await MigrationRunner(db).runMigrations();

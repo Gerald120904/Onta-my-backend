@@ -176,7 +176,9 @@ class MigrationRunner {
       version: 2,
       name: '002_sync_log_and_indexes',
       getSql: (isPostgres) {
-        final autoIncPk = isPostgres ? 'BIGSERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+        final autoIncPk = isPostgres
+            ? 'BIGSERIAL PRIMARY KEY'
+            : 'INTEGER PRIMARY KEY AUTOINCREMENT';
         return '''
           CREATE TABLE IF NOT EXISTS sync_log (
             sequence $autoIncPk,
@@ -369,6 +371,21 @@ class MigrationRunner {
         )''',
       ],
     ),
+    Migration.statements(
+      version: 7,
+      name: '007_jwt_session_families',
+      getStatements: (isPostgres) => [
+        'ALTER TABLE sessions ADD COLUMN ${isPostgres ? 'IF NOT EXISTS ' : ''}sid TEXT',
+        'ALTER TABLE refresh_tokens ADD COLUMN ${isPostgres ? 'IF NOT EXISTS ' : ''}family_id TEXT',
+        '''CREATE TABLE IF NOT EXISTS used_refresh_tokens (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          family_id TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        'CREATE INDEX IF NOT EXISTS idx_used_refresh_family ON used_refresh_tokens(family_id)',
+      ],
+    ),
   ];
 
   Future<void> runMigrations() async {
@@ -382,8 +399,10 @@ class MigrationRunner {
     ''');
 
     // 2. Fetch applied migration versions
-    final appliedRows = await executor.query('SELECT version FROM schema_migrations ORDER BY version ASC');
-    final appliedVersions = appliedRows.map((r) => (r['version'] as num).toInt()).toSet();
+    final appliedRows = await executor
+        .query('SELECT version FROM schema_migrations ORDER BY version ASC');
+    final appliedVersions =
+        appliedRows.map((r) => (r['version'] as num).toInt()).toSet();
 
     // 3. Apply pending migrations sequentially within transactions
     for (final m in migrations) {
@@ -398,7 +417,8 @@ class MigrationRunner {
               await tx.execute(stmt);
             } catch (e) {
               final errStr = e.toString().toLowerCase();
-              if (stmt.toUpperCase().contains('ADD COLUMN') && errStr.contains('duplicate column')) {
+              if (stmt.toUpperCase().contains('ADD COLUMN') &&
+                  errStr.contains('duplicate column')) {
                 // Columna ya existe en SQLite
                 continue;
               }

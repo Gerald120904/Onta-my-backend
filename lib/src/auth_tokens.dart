@@ -2,16 +2,25 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:uuid/uuid.dart';
 
+class VerifiedAccessToken {
+  final String userId;
+  final String sessionId;
+
+  const VerifiedAccessToken(this.userId, this.sessionId);
+}
+
 class AuthTokens {
-  final List<int> _secret;
+  final String _secret;
   static const issuer = 'onta-my-money';
+  static const audience = 'onta-my-money-api';
   static const accessLifetime = Duration(minutes: 15);
   static const refreshLifetime = Duration(days: 30);
 
-  AuthTokens(String secret) : _secret = utf8.encode(secret) {
-    if (_secret.length < 32) {
+  AuthTokens(String secret) : _secret = secret {
+    if (utf8.encode(secret).length < 32) {
       throw StateError('JWT_SECRET debe tener al menos 32 bytes');
     }
   }
@@ -26,54 +35,69 @@ class AuthTokens {
 
   String newRefreshToken() => base64UrlEncode(_randomBytes(48));
 
-  String hashToken(String token) => sha256.convert(utf8.encode(token)).toString();
+  String hashToken(String token) =>
+      sha256.convert(utf8.encode(token)).toString();
 
-  String issueAccessToken(String userId, {DateTime? now}) {
-    final time = (now ?? DateTime.now()).toUtc();
-    final header = _part({'alg': 'HS256', 'typ': 'JWT'});
-    final payload = _part({
-      'iss': issuer,
-      'sub': userId,
-      'jti': const Uuid().v4(),
-      'iat': time.millisecondsSinceEpoch ~/ 1000,
-      'exp': time.add(accessLifetime).millisecondsSinceEpoch ~/ 1000,
-    });
-    final message = '$header.$payload';
-    final signature = Hmac(sha256, _secret).convert(utf8.encode(message)).bytes;
-    return '$message.${base64UrlEncode(signature).replaceAll('=', '')}';
+  String issueAccessToken(String userId, String sessionId, {DateTime? now}) {
+    final issued = (now ?? DateTime.now()).toUtc();
+    final jwt = JWT(
+      <String, dynamic>{
+        'sid': sessionId,
+        'nbf': issued.millisecondsSinceEpoch ~/ 1000,
+        'exp': issued.add(accessLifetime).millisecondsSinceEpoch ~/ 1000,
+        'iat': issued.millisecondsSinceEpoch ~/ 1000,
+      },
+      issuer: issuer,
+      audience: Audience.one(audience),
+      subject: userId,
+      jwtId: const Uuid().v4(),
+    );
+    return jwt.sign(SecretKey(_secret),
+        algorithm: JWTAlgorithm.HS256, noIssueAt: true);
   }
 
-  String? verifyAccessToken(String token, {DateTime? now}) {
-    final parts = token.split('.');
-    if (parts.length != 3) return null;
+  VerifiedAccessToken? verifyAccessClaims(String token, {DateTime? now}) {
     try {
-      final expected = Hmac(sha256, _secret)
-          .convert(utf8.encode('${parts[0]}.${parts[1]}'))
-          .bytes;
-      final supplied = base64Url.decode(base64Url.normalize(parts[2]));
-      if (!_sameBytes(expected, supplied)) return null;
-      final header = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[0]))));
-      final payload = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
-      if (header is! Map || header['alg'] != 'HS256' ||
-          payload is! Map || payload['iss'] != issuer ||
-          payload['sub'] is! String || payload['jti'] is! String ||
-          payload['exp'] is! int || payload['iat'] is! int) return null;
-      final seconds = (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 1000;
-      if (payload['exp'] <= seconds || payload['iat'] > seconds + 60) return null;
-      return payload['sub'] as String;
+      // Reject algorithm/key-confusion before handing the token to the verifier.
+      final untrusted = JWT.decode(token);
+      if (untrusted.header?['alg'] != 'HS256' ||
+          untrusted.header?['typ'] != 'JWT') return null;
+      final verified = JWT.verify(token, SecretKey(_secret),
+          audience: Audience.one(audience),
+          issuer: issuer,
+          checkExpiresIn: true,
+          checkNotBefore: true);
+      if (verified.payload is! Map) return null;
+      final claims = Map<String, dynamic>.from(verified.payload as Map);
+      final sub = claims['sub'];
+      final sid = claims['sid'];
+      final jti = claims['jti'];
+      final iat = claims['iat'];
+      final nbf = claims['nbf'];
+      final exp = claims['exp'];
+      final aud = claims['aud'];
+      final seconds =
+          (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch ~/ 1000;
+      if (sub is! String ||
+          sub.isEmpty ||
+          sid is! String ||
+          sid.isEmpty ||
+          jti is! String ||
+          jti.isEmpty ||
+          iat is! num ||
+          nbf is! num ||
+          exp is! num ||
+          (aud != audience &&
+              !(aud is List && aud.length == 1 && aud.first == audience)) ||
+          iat > seconds + 60 ||
+          nbf > seconds ||
+          exp <= seconds) return null;
+      return VerifiedAccessToken(sub, sid);
     } catch (_) {
       return null;
     }
   }
 
-  static String _part(Map<String, Object> data) =>
-      base64UrlEncode(utf8.encode(jsonEncode(data))).replaceAll('=', '');
-
-  static bool _sameBytes(List<int> a, List<int> b) {
-    var difference = a.length ^ b.length;
-    for (var i = 0; i < a.length; i++) {
-      difference |= a[i] ^ (i < b.length ? b[i] : 0);
-    }
-    return difference == 0;
-  }
+  String? verifyAccessToken(String token, {DateTime? now}) =>
+      verifyAccessClaims(token, now: now)?.userId;
 }

@@ -218,6 +218,52 @@ void main() {
     expect(requests, isEmpty);
   });
 
+  test('El envío de prueba está reservado al admin y limitado por frecuencia',
+      () async {
+    final encrypted = await gmail.encryptRefreshToken('private-refresh-token');
+    await db.execute(
+        'INSERT INTO gmail_oauth_tokens(id,encrypted_refresh_token,authorized_email,updated_at) '
+        'VALUES(?,?,?,?)',
+        [
+          'primary',
+          encrypted,
+          'receptor847@gmail.com',
+          DateTime.now().toUtc().toIso8601String()
+        ]);
+    final concurrentSends = await Future.wait([
+      send('POST', '/api/oauth/google/test-send',
+          token: adminToken, body: {}),
+      send('POST', '/api/oauth/google/test-send',
+          token: adminToken, body: {}),
+    ]);
+    expect(concurrentSends.map((response) => response.statusCode).toList(),
+        containsAll([200, 429]));
+    final now = DateTime.now().toUtc().toIso8601String();
+    await db.execute(
+        'INSERT INTO users(id,name,email,password_hash,opening_balance,created_at,updated_at) '
+        'VALUES(?,?,?,?,?,?,?)',
+        [
+          'other-test',
+          'Other',
+          'other@example.com',
+          db.hashPassword('StrongPassword123!'),
+          0,
+          now,
+          now
+        ]);
+    final login = await send('POST', '/api/auth/login', body: {
+      'email': 'other@example.com',
+      'password': 'StrongPassword123!',
+    });
+    final otherToken =
+        (jsonDecode(await login.readAsString()) as Map)['token'] as String;
+    expect(
+        (await send('POST', '/api/oauth/google/test-send',
+                token: otherToken, body: {}))
+            .statusCode,
+        403);
+  });
+
   test('Registro requiere verificación de un solo uso', () async {
     final encrypted = await gmail.encryptRefreshToken('private-refresh-token');
     await db.execute(

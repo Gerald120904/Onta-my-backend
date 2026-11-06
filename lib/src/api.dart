@@ -59,6 +59,7 @@ class Api {
     r.post('/api/auth/resend-verification', _resendVerification);
     r.get('/api/oauth/google/start', _auth(_startGoogleOAuth));
     r.get('/api/oauth/google/callback', _googleCallback);
+    r.post('/api/oauth/google/test-send', _auth(_testGmailDelivery));
     r.post('/api/auth/logout', _auth(_logout));
     r.post('/api/auth/logout-all', _auth(_logoutAll));
     r.get('/api/auth/me', _auth(_currentUser));
@@ -141,10 +142,13 @@ class Api {
     return (Request request) async {
       final token = _token(request);
       final userId = await database.userIdFromTokenAsync(token);
+      final isJwt = token != null && token.split('.').length == 3;
+      final claims = isJwt ? authTokens.verifyAccessClaims(token) : null;
       if (userId == null ||
-          (token != null &&
-              token.contains('.') &&
-              authTokens.verifyAccessToken(token) != userId)) {
+          (isJwt &&
+              (claims == null ||
+                  claims.userId != userId ||
+                  !await database.sessionMatches(token, claims.sessionId)))) {
         return _json({'message': 'Sesión inválida o expirada'}, status: 401);
       }
       final route = request.url.pathSegments;
@@ -199,7 +203,7 @@ class Api {
     );
 
     if (rows.isEmpty) {
-      await _recordFailedLogin(attemptKey, attempts, now);
+      await _recordFailedLogin(attemptKey, now);
       return _json({'message': 'Credenciales inválidas'}, status: 401);
     }
 
@@ -207,7 +211,7 @@ class Api {
     final storedHash = user['password_hash'] as String;
 
     if (!database.verifyPassword(password, storedHash)) {
-      await _recordFailedLogin(attemptKey, attempts, now);
+      await _recordFailedLogin(attemptKey, now);
       return _json({'message': 'Credenciales inválidas'}, status: 401);
     }
 
@@ -237,39 +241,39 @@ class Api {
     });
   }
 
-  Future<void> _recordFailedLogin(
-      String key, List<Map<String, dynamic>> rows, DateTime now) async {
-    final failures =
-        (rows.isEmpty ? 0 : (rows.first['failures'] as num).toInt()) + 1;
-    final blockedUntil = failures >= 5
-        ? now.add(const Duration(minutes: 15)).toIso8601String()
-        : null;
+  Future<void> _recordFailedLogin(String key, DateTime now) async {
+    final nowString = now.toIso8601String();
+    final blockedUntil = now.add(const Duration(minutes: 15)).toIso8601String();
     await database.execute(
       'INSERT INTO auth_attempts(attempt_key, failures, blocked_until, updated_at) '
-      'VALUES(?,?,?,?) ON CONFLICT(attempt_key) DO UPDATE SET '
-      'failures=excluded.failures, blocked_until=excluded.blocked_until, updated_at=excluded.updated_at',
-      [key, failures, blockedUntil, now.toIso8601String()],
+      'VALUES(?,1,NULL,?) ON CONFLICT(attempt_key) DO UPDATE SET '
+      'failures=auth_attempts.failures+1, '
+      'blocked_until=CASE WHEN auth_attempts.failures+1>=5 '
+      'THEN ? ELSE auth_attempts.blocked_until END, updated_at=?',
+      [key, nowString, blockedUntil, nowString],
     );
   }
 
   Future<Map<String, String>> _createSession(String userId) async {
-    final token = authTokens.issueAccessToken(userId);
+    final sessionId = _uuid.v4();
+    final token = authTokens.issueAccessToken(userId, sessionId);
     final refreshToken = authTokens.newRefreshToken();
     final now = DateTime.now().toUtc();
     final expiresAt = now.add(AuthTokens.refreshLifetime).toIso8601String();
     await database.transaction((tx) async {
       await tx.execute(
-        'INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)',
-        [token, userId, now.toIso8601String(), expiresAt],
+        'INSERT INTO sessions(token, user_id, created_at, expires_at, sid) VALUES(?,?,?,?,?)',
+        [token, userId, now.toIso8601String(), expiresAt, sessionId],
       );
       await tx.execute(
-        'INSERT INTO refresh_tokens(token_hash, access_token, user_id, created_at, expires_at) VALUES(?,?,?,?,?)',
+        'INSERT INTO refresh_tokens(token_hash, access_token, user_id, created_at, expires_at, family_id) VALUES(?,?,?,?,?,?)',
         [
           authTokens.hashToken(refreshToken),
           token,
           userId,
           now.toIso8601String(),
-          expiresAt
+          expiresAt,
+          sessionId
         ],
       );
     });
@@ -286,45 +290,62 @@ class Api {
     if (raw.isEmpty) return _json({'message': 'Sesión inválida'}, status: 401);
     final hash = authTokens.hashToken(raw);
     final result = await database.transaction((tx) async {
+      final now = DateTime.now().toUtc();
+      final nowString = now.toIso8601String();
+      await tx.execute(
+          'DELETE FROM used_refresh_tokens WHERE expires_at<=?', [nowString]);
       final rows = await tx.query(
         'DELETE FROM refresh_tokens WHERE token_hash=? '
-        'RETURNING user_id, access_token, expires_at',
+        'RETURNING user_id, access_token, expires_at, family_id',
         [hash],
       );
-      if (rows.isEmpty) return null;
+      if (rows.isEmpty) {
+        final replay = await tx.query(
+            'SELECT family_id FROM used_refresh_tokens WHERE token_hash=? AND expires_at>? ',
+            [hash, nowString]);
+        if (replay.isEmpty) return null;
+        final familyId = replay.first['family_id'] as String;
+        await tx.execute(
+            'DELETE FROM refresh_tokens WHERE family_id=?', [familyId]);
+        await tx.execute('DELETE FROM sessions WHERE sid=?', [familyId]);
+        return const {'status': 'replay'};
+      }
       final row = rows.first;
       final expiresAt = row['expires_at'].toString();
-      if (DateTime.tryParse(expiresAt)?.isAfter(DateTime.now().toUtc()) !=
-          true) {
-        return null;
-      }
+      if (DateTime.tryParse(expiresAt)?.isAfter(now) != true) return null;
       final userId = row['user_id'] as String;
-      final replacement = authTokens.issueAccessToken(userId);
+      final familyId = (row['family_id'] as String?) ?? _uuid.v4();
+      await tx.execute(
+          'INSERT INTO used_refresh_tokens(token_hash,user_id,family_id,expires_at) VALUES(?,?,?,?)',
+          [hash, userId, familyId, expiresAt]);
+      final replacement = authTokens.issueAccessToken(userId, familyId);
       final nextRefresh = authTokens.newRefreshToken();
-      final now = DateTime.now().toUtc().toIso8601String();
       await tx.execute('DELETE FROM sessions WHERE token=? AND user_id=?',
           [row['access_token'], userId]);
       await tx.execute(
-          'INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)',
-          [replacement, userId, now, expiresAt]);
+          'INSERT INTO sessions(token, user_id, created_at, expires_at, sid) VALUES(?,?,?,?,?)',
+          [replacement, userId, nowString, expiresAt, familyId]);
       await tx.execute(
-          'INSERT INTO refresh_tokens(token_hash, access_token, user_id, created_at, expires_at) VALUES(?,?,?,?,?)',
+          'INSERT INTO refresh_tokens(token_hash, access_token, user_id, created_at, expires_at, family_id) VALUES(?,?,?,?,?,?)',
           [
             authTokens.hashToken(nextRefresh),
             replacement,
             userId,
-            now,
-            expiresAt
+            nowString,
+            expiresAt,
+            familyId
           ]);
       return {
+        'status': 'ok',
         'token': replacement,
         'refresh_token': nextRefresh,
         'expires_at': expiresAt
       };
     });
-    if (result == null)
+    if (result == null || result['status'] != 'ok')
       return _json({'message': 'Sesión inválida o expirada'}, status: 401);
-    return _json(result);
+    final credentials = Map<String, dynamic>.from(result)..remove('status');
+    return _json(credentials);
   }
 
   Future<Response> _forgotPassword(Request request) async {
@@ -349,7 +370,7 @@ class Api {
       return _json({'message': 'Demasiados intentos. Intenta más tarde.'},
           status: 429);
     }
-    await _recordFailedLogin(key, attempts, now);
+    await _recordFailedLogin(key, now);
     final users =
         await database.query('SELECT id FROM users WHERE email=?', [email]);
     if (users.isNotEmpty) {
@@ -519,6 +540,49 @@ class Api {
         {'authorization_url': await gmailService!.beginAuthorization(userId)});
   }
 
+  Future<Response> _testGmailDelivery(Request request, String userId,
+      [String? ignored]) async {
+    final gmail = gmailService;
+    if (gmail == null) {
+      return _json({'message': 'Gmail no configurado'}, status: 503);
+    }
+    if (userId != gmail.config.adminUserId) {
+      return _json({'message': 'No autorizado'}, status: 403);
+    }
+    final authorization = await database
+        .query('SELECT id FROM gmail_oauth_tokens WHERE id=?', ['primary']);
+    if (authorization.isEmpty) {
+      return _json({'message': 'Gmail requiere autorización'}, status: 503);
+    }
+    final key = authTokens.hashToken('gmail-test:$userId');
+    final now = DateTime.now().toUtc();
+    final nowString = now.toIso8601String();
+    final claim = await database.query(
+        'INSERT INTO auth_attempts(attempt_key,failures,blocked_until,updated_at) VALUES(?,?,?,?) '
+        'ON CONFLICT(attempt_key) DO UPDATE SET failures=1,blocked_until=excluded.blocked_until,updated_at=excluded.updated_at '
+        'WHERE auth_attempts.blocked_until IS NULL OR auth_attempts.blocked_until<=? RETURNING attempt_key',
+        [
+          key,
+          1,
+          now.add(const Duration(minutes: 5)).toIso8601String(),
+          nowString,
+          nowString
+        ]);
+    if (claim.isEmpty) {
+      return _json({'message': 'Prueba temporalmente limitada'}, status: 429);
+    }
+    try {
+      await gmail.sendMail(
+          gmail.config.from,
+          MailTemplates.securityNotice(
+              'Prueba de envío de correo de Onta My Money.'));
+      return _json({'ok': true});
+    } catch (_) {
+      return _json({'message': 'No se pudo completar la prueba de correo'},
+          status: 502);
+    }
+  }
+
   Future<Response> _googleCallback(Request request) async {
     if (gmailService == null)
       return Response(503, body: 'Gmail no configurado');
@@ -614,7 +678,7 @@ class Api {
       return _json({'message': 'Demasiados intentos. Intentá más tarde.'},
           status: 429);
     }
-    await _recordFailedLogin(key, attempts, now);
+    await _recordFailedLogin(key, now);
     final users = await database.query(
         'SELECT id FROM users WHERE email=? AND email_verified=0', [email]);
     if (users.isNotEmpty)

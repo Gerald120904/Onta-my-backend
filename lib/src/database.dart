@@ -63,6 +63,13 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
   /// Asynchronous user ID retrieval with expiration check for both engines.
   Future<String?> userIdFromTokenAsync(String? token);
 
+  Future<bool> sessionMatches(String token, String sessionId) async {
+    final rows = await query(
+        'SELECT 1 AS active FROM sessions WHERE token=? AND sid=?',
+        [token, sessionId]);
+    return rows.isNotEmpty;
+  }
+
   /// Revokes all active sessions immediately.
   Future<void> revokeAllSessions() async {
     await execute('DELETE FROM refresh_tokens');
@@ -167,6 +174,7 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
 
 class SqliteAppDatabase extends AppDatabase {
   final sqlite.Database _sqliteDb;
+  Future<void> _transactionTail = Future<void>.value();
 
   SqliteAppDatabase._(this._sqliteDb) : super.base() {
     _initMigrations();
@@ -239,16 +247,25 @@ class SqliteAppDatabase extends AppDatabase {
         token TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'
+        expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z',
+        sid TEXT
       );
       CREATE TABLE IF NOT EXISTS refresh_tokens(
         token_hash TEXT PRIMARY KEY,
         access_token TEXT NOT NULL,
         user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
+        expires_at TEXT NOT NULL,
+        family_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+      CREATE TABLE IF NOT EXISTS used_refresh_tokens(
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        family_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_used_refresh_family ON used_refresh_tokens(family_id);
       CREATE TABLE IF NOT EXISTS password_reset_tokens(
         token_hash TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -391,6 +408,8 @@ class SqliteAppDatabase extends AppDatabase {
     ''');
 
     _addColumnIfNotExists('sessions', 'expires_at', "TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
+    _addColumnIfNotExists('sessions', 'sid', 'TEXT');
+    _addColumnIfNotExists('refresh_tokens', 'family_id', 'TEXT');
     _addColumnIfNotExists('accounts', 'initial_balance', 'NUMERIC(18,2) NOT NULL DEFAULT 0');
     _addColumnIfNotExists('accounts', 'opening_balance', 'NUMERIC(18,2) NOT NULL DEFAULT 0');
     _addColumnIfNotExists('accounts', 'color', 'TEXT');
@@ -464,14 +483,22 @@ class SqliteAppDatabase extends AppDatabase {
 
   @override
   Future<T> transaction<T>(Future<T> Function(DatabaseExecutor tx) action) async {
-    _sqliteDb.execute('BEGIN TRANSACTION');
+    final previous = _transactionTail;
+    final release = Completer<void>();
+    _transactionTail = release.future;
+    await previous;
     try {
+      _sqliteDb.execute('BEGIN TRANSACTION');
       final result = await action(this);
       _sqliteDb.execute('COMMIT');
       return result;
     } catch (e) {
-      _sqliteDb.execute('ROLLBACK');
+      try {
+        _sqliteDb.execute('ROLLBACK');
+      } catch (_) {}
       rethrow;
+    } finally {
+      release.complete();
     }
   }
 
