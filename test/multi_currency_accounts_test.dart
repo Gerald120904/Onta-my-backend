@@ -40,6 +40,7 @@ void main() {
     });
 
     Future<Map<String, String>> registerAndLogin(String email, String password, String name, double balance) async {
+      password = '${password}Secure';
       final reg = await send('POST', '/api/auth/register', body: {
         'name': name,
         'email': email,

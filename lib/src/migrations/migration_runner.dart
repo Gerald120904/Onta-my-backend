@@ -176,7 +176,9 @@ class MigrationRunner {
       version: 2,
       name: '002_sync_log_and_indexes',
       getSql: (isPostgres) {
-        final autoIncPk = isPostgres ? 'BIGSERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+        final autoIncPk = isPostgres
+            ? 'BIGSERIAL PRIMARY KEY'
+            : 'INTEGER PRIMARY KEY AUTOINCREMENT';
         return '''
           CREATE TABLE IF NOT EXISTS sync_log (
             sequence $autoIncPk,
@@ -317,6 +319,73 @@ class MigrationRunner {
         return stmts;
       },
     ),
+    Migration.statements(
+      version: 5,
+      name: '005_auth_tokens',
+      getStatements: (_) => [
+        '''CREATE TABLE IF NOT EXISTS refresh_tokens (
+          token_hash TEXT PRIMARY KEY,
+          access_token TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)',
+        '''CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        'CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id)',
+        '''CREATE TABLE IF NOT EXISTS auth_attempts (
+          attempt_key TEXT PRIMARY KEY,
+          failures INTEGER NOT NULL,
+          blocked_until TEXT,
+          updated_at TEXT NOT NULL
+        )''',
+      ],
+    ),
+    Migration.statements(
+      version: 6,
+      name: '006_gmail_oauth',
+      getStatements: (isPostgres) => [
+        'ALTER TABLE users ADD COLUMN ${isPostgres ? 'IF NOT EXISTS' : ''} email_verified INTEGER NOT NULL DEFAULT 1',
+        '''CREATE TABLE IF NOT EXISTS email_verification_tokens (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        'CREATE INDEX IF NOT EXISTS idx_email_verification_user_id ON email_verification_tokens(user_id)',
+        '''CREATE TABLE IF NOT EXISTS gmail_oauth_states (
+          state_hash TEXT PRIMARY KEY,
+          admin_user_id TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        '''CREATE TABLE IF NOT EXISTS gmail_oauth_tokens (
+          id TEXT PRIMARY KEY,
+          encrypted_refresh_token TEXT NOT NULL,
+          authorized_email TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )''',
+      ],
+    ),
+    Migration.statements(
+      version: 7,
+      name: '007_jwt_session_families',
+      getStatements: (isPostgres) => [
+        'ALTER TABLE sessions ADD COLUMN ${isPostgres ? 'IF NOT EXISTS ' : ''}sid TEXT',
+        'ALTER TABLE refresh_tokens ADD COLUMN ${isPostgres ? 'IF NOT EXISTS ' : ''}family_id TEXT',
+        '''CREATE TABLE IF NOT EXISTS used_refresh_tokens (
+          token_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          family_id TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )''',
+        'CREATE INDEX IF NOT EXISTS idx_used_refresh_family ON used_refresh_tokens(family_id)',
+      ],
+    ),
   ];
 
   Future<void> runMigrations() async {
@@ -330,8 +399,10 @@ class MigrationRunner {
     ''');
 
     // 2. Fetch applied migration versions
-    final appliedRows = await executor.query('SELECT version FROM schema_migrations ORDER BY version ASC');
-    final appliedVersions = appliedRows.map((r) => (r['version'] as num).toInt()).toSet();
+    final appliedRows = await executor
+        .query('SELECT version FROM schema_migrations ORDER BY version ASC');
+    final appliedVersions =
+        appliedRows.map((r) => (r['version'] as num).toInt()).toSet();
 
     // 3. Apply pending migrations sequentially within transactions
     for (final m in migrations) {
@@ -346,7 +417,8 @@ class MigrationRunner {
               await tx.execute(stmt);
             } catch (e) {
               final errStr = e.toString().toLowerCase();
-              if (stmt.toUpperCase().contains('ADD COLUMN') && errStr.contains('duplicate column')) {
+              if (stmt.toUpperCase().contains('ADD COLUMN') &&
+                  errStr.contains('duplicate column')) {
                 // Columna ya existe en SQLite
                 continue;
               }

@@ -139,6 +139,19 @@ void main() {
         );
       });
 
+      test('La URL inválida no aparece en el error de producción', () async {
+        const secret = 'credential-that-must-not-appear';
+        try {
+          await AppDatabase.openAsync(
+            databaseUrl: 'sqlite://user:$secret@localhost/data',
+            isProduction: true,
+          );
+          fail('La URL inválida debía rechazarse');
+        } on ArgumentError catch (error) {
+          expect(error.toString(), isNot(contains(secret)));
+        }
+      });
+
       test('2.5 En desarrollo (isProduction: false), la ausencia de DATABASE_URL conserva SQLite local', () async {
         final db = await AppDatabase.openAsync(
           databaseUrl: null,
@@ -204,6 +217,7 @@ void main() {
           environment: {
             'ENVIRONMENT': 'production',
             'DATABASE_URL': 'postgresql://postgres@127.0.0.1:5433/onta_test?sslmode=disable',
+            'JWT_SECRET': 'test-only-secret-with-at-least-32-bytes',
             'PORT': '8993',
           },
           stdoutEncoding: utf8,
