@@ -94,7 +94,10 @@ Future<void> main() async {
         environment: env,
       );
     } catch (e) {
-      stderr.writeln('ERROR CRÍTICO: No se pudo conectar a PostgreSQL en producción: $e');
+      final reason = e is StateError && e.toString().contains('sslmode=disable')
+          ? 'sslmode=disable está prohibido en producción'
+          : 'error ${e.runtimeType}';
+      stderr.writeln('ERROR CRÍTICO: No se pudo conectar a PostgreSQL en producción ($reason).');
       exit(1);
     }
   } else {

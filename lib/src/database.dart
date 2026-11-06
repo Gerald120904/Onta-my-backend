@@ -136,7 +136,7 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
       }
       if (!isValidPostgresUrl(url)) {
         throw ArgumentError(
-          'DATABASE_URL no es una URL de PostgreSQL válida en producción: "$url". '
+          'DATABASE_URL no es una URL de PostgreSQL válida en producción. '
           'Se detiene el arranque; nunca se debe usar SQLite en producción.',
         );
       }
