@@ -65,6 +65,7 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
 
   /// Revokes all active sessions immediately.
   Future<void> revokeAllSessions() async {
+    await execute('DELETE FROM refresh_tokens');
     await execute('DELETE FROM sessions');
   }
 
@@ -73,6 +74,8 @@ abstract class AppDatabase implements DatabaseExecutor, MigrationExecutor {
     final cutoffIso = cutoff.toIso8601String();
     final countRows = await query('SELECT COUNT(*) total FROM sessions WHERE created_at < ?', [cutoffIso]);
     final count = (countRows.first['total'] as num).toInt();
+    await execute('DELETE FROM refresh_tokens WHERE access_token IN '
+        '(SELECT token FROM sessions WHERE created_at < ?)', [cutoffIso]);
     await execute('DELETE FROM sessions WHERE created_at < ?', [cutoffIso]);
     return count;
   }
@@ -214,11 +217,50 @@ class SqliteAppDatabase extends AppDatabase {
         updated_at TEXT,
         version INTEGER NOT NULL DEFAULT 1
       );
+      CREATE TABLE IF NOT EXISTS email_verification_tokens(
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_email_verification_user_id ON email_verification_tokens(user_id);
+      CREATE TABLE IF NOT EXISTS gmail_oauth_states(
+        state_hash TEXT PRIMARY KEY,
+        admin_user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS gmail_oauth_tokens(
+        id TEXT PRIMARY KEY,
+        encrypted_refresh_token TEXT NOT NULL,
+        authorized_email TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS sessions(
         token TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'
+      );
+      CREATE TABLE IF NOT EXISTS refresh_tokens(
+        token_hash TEXT PRIMARY KEY,
+        access_token TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+      CREATE TABLE IF NOT EXISTS password_reset_tokens(
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id);
+      CREATE TABLE IF NOT EXISTS auth_attempts(
+        attempt_key TEXT PRIMARY KEY,
+        failures INTEGER NOT NULL,
+        blocked_until TEXT,
+        updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS transactions(
         id TEXT PRIMARY KEY,
@@ -363,6 +405,7 @@ class SqliteAppDatabase extends AppDatabase {
     }
     _addColumnIfNotExists('users', 'updated_at', 'TEXT');
     _addColumnIfNotExists('users', 'version', 'INTEGER NOT NULL DEFAULT 1');
+    _addColumnIfNotExists('users', 'email_verified', 'INTEGER NOT NULL DEFAULT 1');
 
     try {
       _sqliteDb.execute('''

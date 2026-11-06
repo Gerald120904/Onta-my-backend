@@ -5,11 +5,18 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import '../lib/src/api.dart';
 import '../lib/src/database.dart';
 
-Middleware corsMiddleware({required bool isProduction, String? allowedOriginOverride}) {
-  final rawAllowedOrigin = allowedOriginOverride ?? Platform.environment['ALLOWED_ORIGIN'];
-  final List<String> allowedOrigins = (rawAllowedOrigin != null && rawAllowedOrigin.trim().isNotEmpty)
-      ? rawAllowedOrigin.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList()
-      : <String>[];
+Middleware corsMiddleware(
+    {required bool isProduction, String? allowedOriginOverride}) {
+  final rawAllowedOrigin =
+      allowedOriginOverride ?? Platform.environment['ALLOWED_ORIGIN'];
+  final List<String> allowedOrigins =
+      (rawAllowedOrigin != null && rawAllowedOrigin.trim().isNotEmpty)
+          ? rawAllowedOrigin
+              .split(',')
+              .map((e) => e.trim())
+              .where((e) => e.isNotEmpty)
+              .toList()
+          : <String>[];
 
   return (Handler innerHandler) {
     return (Request request) async {
@@ -19,16 +26,21 @@ Middleware corsMiddleware({required bool isProduction, String? allowedOriginOver
       if (isProduction) {
         // En producción NO se permite comodín '*'
         // Se valida estrictamente contra la lista blanca configurada en ALLOWED_ORIGIN (ej. Cloudflare Pages)
-        if (originHeader != null && allowedOrigins.contains(originHeader) && originHeader != '*') {
+        if (originHeader != null &&
+            allowedOrigins.contains(originHeader) &&
+            originHeader != '*') {
           allowOrigin = originHeader;
         } else {
           allowOrigin = '';
         }
       } else {
         // En desarrollo / local se permite comodín o el origen entrante
-        if (rawAllowedOrigin == null || rawAllowedOrigin == '*' || allowedOrigins.contains('*')) {
+        if (rawAllowedOrigin == null ||
+            rawAllowedOrigin == '*' ||
+            allowedOrigins.contains('*')) {
           allowOrigin = originHeader ?? '*';
-        } else if (originHeader != null && allowedOrigins.contains(originHeader)) {
+        } else if (originHeader != null &&
+            allowedOrigins.contains(originHeader)) {
           allowOrigin = originHeader;
         } else {
           allowOrigin = allowedOrigins.isNotEmpty ? allowedOrigins.first : '*';
@@ -37,8 +49,10 @@ Middleware corsMiddleware({required bool isProduction, String? allowedOriginOver
 
       final corsHeaders = <String, String>{
         if (allowOrigin.isNotEmpty) 'Access-Control-Allow-Origin': allowOrigin,
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Origin, Content-Type, Accept, Authorization, X-Device-Id',
+        'Access-Control-Allow-Methods':
+            'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers':
+            'Origin, Content-Type, Accept, Authorization, X-Device-Id',
         'Access-Control-Max-Age': '86400',
         if (isProduction && allowOrigin.isNotEmpty) 'Vary': 'Origin',
       };
@@ -59,6 +73,16 @@ Middleware corsMiddleware({required bool isProduction, String? allowedOriginOver
   };
 }
 
+Middleware safeRequestLogging() => (Handler inner) => (Request request) async {
+      final started = DateTime.now();
+      final response = await inner(request);
+      final elapsed = DateTime.now().difference(started).inMilliseconds;
+      // La ruta excluye query parameters, incluidos code/state OAuth y tokens.
+      stdout.writeln(
+          '${request.method} /${request.url.path} ${response.statusCode} ${elapsed}ms');
+      return response;
+    };
+
 Future<void> main() async {
   final env = Platform.environment['ENVIRONMENT']?.toLowerCase() ??
       Platform.environment['APP_ENV']?.toLowerCase() ??
@@ -67,7 +91,8 @@ Future<void> main() async {
   final isProduction = env == 'production' || env == 'prod';
 
   // Desactivación incondicional de la cuenta de demostración en producción
-  final allowSeed = !isProduction && (Platform.environment['SEED_DEMO_USER']?.toLowerCase() != 'false');
+  final allowSeed = !isProduction &&
+      (Platform.environment['SEED_DEMO_USER']?.toLowerCase() != 'false');
 
   final databaseUrl = Platform.environment['DATABASE_URL'];
   final dbPath = Platform.environment['DATABASE_PATH'];
@@ -86,8 +111,15 @@ Future<void> main() async {
       exit(1);
     }
 
+    if ((Platform.environment['JWT_SECRET']?.length ?? 0) < 32) {
+      stderr.writeln(
+          'ERROR CRÍTICO: JWT_SECRET ausente o demasiado corto en producción.');
+      exit(1);
+    }
+
     try {
-      print('Conectando a base de datos PostgreSQL en la nube (Producción con TLS obligatorio)...');
+      print(
+          'Conectando a base de datos PostgreSQL en la nube (Producción con TLS obligatorio)...');
       db = await AppDatabase.openAsync(
         databaseUrl: databaseUrl,
         isProduction: true,
@@ -97,7 +129,8 @@ Future<void> main() async {
       final reason = e is StateError && e.toString().contains('sslmode=disable')
           ? 'sslmode=disable está prohibido en producción'
           : 'error ${e.runtimeType}';
-      stderr.writeln('ERROR CRÍTICO: No se pudo conectar a PostgreSQL en producción ($reason).');
+      stderr.writeln(
+          'ERROR CRÍTICO: No se pudo conectar a PostgreSQL en producción ($reason).');
       exit(1);
     }
   } else {
@@ -119,11 +152,14 @@ Future<void> main() async {
   }
 
   final handler = Pipeline()
-      .addMiddleware(logRequests())
+      .addMiddleware(safeRequestLogging())
       .addMiddleware(corsMiddleware(isProduction: isProduction))
       .addHandler(Api(db).router.call);
 
-  final port = int.tryParse(Platform.environment['PORT'] ?? Platform.environment['API_PORT'] ?? '') ?? 8080;
+  final port = int.tryParse(Platform.environment['PORT'] ??
+          Platform.environment['API_PORT'] ??
+          '') ??
+      8080;
 
   final server = await shelf_io.serve(
     handler,
@@ -134,8 +170,10 @@ Future<void> main() async {
   print('');
   print('========================================');
   print(' API ¿Dónde se fue mi plata?');
-  print(' Servidor escuchando en: http://${server.address.host}:${server.port}');
-  print(' Motor de persistencia: ${db.isPostgres ? "PostgreSQL (Neon TLS)" : (dbPath ?? "SQLite data/plata.db")}');
+  print(
+      ' Servidor escuchando en: http://${server.address.host}:${server.port}');
+  print(
+      ' Motor de persistencia: ${db.isPostgres ? "PostgreSQL (Neon TLS)" : (dbPath ?? "SQLite data/plata.db")}');
   print(' Entorno: $env (Producción: $isProduction)');
   print(' Puerto activo: ${server.port}');
   print('========================================');
